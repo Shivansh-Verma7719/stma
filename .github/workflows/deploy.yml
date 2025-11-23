@@ -31,4 +31,5 @@ jobs:
           AWS_DEFAULT_REGION: ap-south-1
         run: |
           cd infra/cdk
-          cdk deploy --require-approval never
+          cdk deploy --require-approval never --outputs-file outputs.json
+          cat outputs.json

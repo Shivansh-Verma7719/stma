@@ -55,3 +55,9 @@ class CdkStack(Stack):
             removal_policy=RemovalPolicy.DESTROY,
             deletion_protection=False
         )
+
+        from aws_cdk import CfnOutput
+        CfnOutput(self, "DbEndpoint", value=db_instance.db_instance_endpoint_address)
+        CfnOutput(self, "DbPort", value=db_instance.db_instance_endpoint_port)
+        CfnOutput(self, "DbName", value="projectdb") # We hardcoded this in the stack
+        CfnOutput(self, "DbUser", value="postgres") # Default for Postgres
