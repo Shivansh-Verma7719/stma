@@ -11,9 +11,6 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: infra/cdk
 
     steps:
       - name: Checkout code
@@ -26,6 +23,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+          cd infra/cdk
           pip install -r requirements.txt
 
       - name: Install CDK
@@ -36,4 +34,6 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
-        run: cdk deploy --require-approval never
+        run: |
+          cd infra/cdk
+          cdk deploy --require-approval never
