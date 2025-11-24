@@ -10,7 +10,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import mediacloud.api
 from dotenv import load_dotenv
-from helpers.db_helper import insert_articles, get_domain
+from helpers.db_helper import (
+    insert_articles, 
+    get_domain, 
+    get_unprocessed_companies,
+    update_company_state,
+    mark_company_complete
+)
 
 import logging
 from collections import deque
@@ -57,26 +63,8 @@ global_metrics = {
 }
 
 
-def get_sp500_companies() -> Optional[pd.DataFrame]:
-    print("Fetching S&P 500 companies list...")
-    url = "https://www.slickcharts.com/sp500"
-    try:
-        user_agent = (
-            "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) "
-            "Gecko/20100101 Firefox/111.0"
-        )
-        response = requests.get(url, headers={"User-Agent": user_agent})
-        response.raise_for_status()
-        sp500_df = pd.read_html(
-            StringIO(response.text), match="Symbol", index_col="Symbol"
-        )[0]
-        # Ensure clean, 0-based integer index for easy chunking
-        return sp500_df.reset_index()
-    except Exception as e:
-        msg = f"Error fetching S&P 500 list: {e}"
-        print(msg)
-        recent_errors.append(msg)
-        return None
+# Removed get_sp500_companies() - now using database-backed company list
+# See scripts/seed_sp500.py to populate companies table
 
 
 def create_search_query(company_name: str, stock_symbol: str) -> str:
@@ -115,12 +103,12 @@ def countdown_sleep(worker_id: int, seconds: int):
 
 
 def query_media_cloud(
-    search_api: mediacloud.api.SearchApi, query: str, worker_id: int
+    search_api: mediacloud.api.SearchApi, query: str, worker_id: int, start_page: int = 1
 ):
-    """Yields pages of stories."""
+    """Yields pages of stories, optionally resuming from a specific page."""
     pagination_token = None
     more_stories = True
-    page_num = 1
+    page_num = start_page
 
     try:
         while more_stories:
@@ -162,15 +150,25 @@ def process_company(
     company_name: str,
     stock_symbol: str,
     worker_id: int,
+    start_page: int = 1,
 ):
-    """Yields batches of processed articles."""
-    update_worker_state(worker_id, company=company_name, symbol=stock_symbol, status="Starting query...")
+    """Yields batches of processed articles with page tracking."""
+    resume_msg = f" (resuming from page {start_page})" if start_page > 1 else ""
+    update_worker_state(
+        worker_id, 
+        company=company_name, 
+        symbol=stock_symbol, 
+        status=f"Starting query...{resume_msg}"
+    )
     
     query = create_search_query(company_name, stock_symbol)
     
     # Iterate over pages yielded by query_media_cloud
-    for articles_page in query_media_cloud(search_api, query, worker_id):
-        yield [
+    for page_num, articles_page in enumerate(query_media_cloud(search_api, query, worker_id, start_page), start=start_page):
+        # Update database with current page before processing
+        update_company_state(stock_symbol, current_page=page_num)
+        
+        yield page_num, [
             {
                 "company_name": company_name,
                 "stock_symbol": stock_symbol,
@@ -192,38 +190,53 @@ def chunk_dataframe(df: pd.DataFrame, n_chunks: int) -> List[pd.DataFrame]:
     return [df.iloc[i : i + chunk_size] for i in range(0, len(df), chunk_size)]
 
 
-def worker_run(worker_id: int, api_key: str, companies_df: pd.DataFrame):
+def worker_run(worker_id: int, api_key: str, companies_list: List[Dict]):
+    """Process a list of companies with resumable state tracking."""
     update_worker_state(worker_id, status="Initializing...")
     search_api = mediacloud.api.SearchApi(api_key)
 
-    total = len(companies_df)
-    for local_idx, (_, row) in enumerate(companies_df.iterrows(), start=1):
-        company = row["Company"]
-        symbol = row["Symbol"]
+    total = len(companies_list)
+    for local_idx, company_record in enumerate(companies_list, start=1):
+        company = company_record["name"]
+        symbol = company_record["symbol"]
+        start_page = company_record.get("current_page", 0) + 1  # Resume from next page
 
         # Update progress
         update_worker_state(worker_id, status=f"Processing {local_idx}/{total}")
         
-        # Iterate over batches yielded by process_company
-        found_any = False
-        for articles_batch in process_company(search_api, company, symbol, worker_id):
-            if articles_batch:
-                found_any = True
-                update_worker_state(worker_id, status=f"Pushing {len(articles_batch)} to DB...")
-                insert_articles(articles_batch)
-                
-                # Update global metrics (articles and media outlets only - companies counted when fully done)
-                with global_metrics_lock:
-                    global_metrics["total_articles_pushed"] += len(articles_batch)
-                    for article in articles_batch:
-                        domain = get_domain(article.get('url'))
-                        if domain:
-                            global_metrics["unique_media_outlets"].add(domain)
+        try:
+            # Iterate over batches yielded by process_company
+            found_any = False
+            for page_num, articles_batch in process_company(search_api, company, symbol, worker_id, start_page):
+                if articles_batch:
+                    found_any = True
+                    update_worker_state(worker_id, status=f"Pushing {len(articles_batch)} to DB...")
+                    insert_articles(articles_batch)
+                    
+                    # Update global metrics (articles and media outlets only - companies counted when fully done)
+                    with global_metrics_lock:
+                        global_metrics["total_articles_pushed"] += len(articles_batch)
+                        for article in articles_batch:
+                            domain = get_domain(article.get('url'))
+                            if domain:
+                                global_metrics["unique_media_outlets"].add(domain)
+            
+            # Mark company as fully processed after all pages are done
+            mark_company_complete(symbol)
+            with global_metrics_lock:
+                global_metrics["companies_processed"].add(symbol)
         
-        # Mark company as fully processed after all pages are done
-        with global_metrics_lock:
-            global_metrics["companies_processed"].add(symbol)
-
+        except Exception as e:
+            # Persist error to database for debugging
+            error_msg = str(e)[:500]  # Truncate long errors
+            update_company_state(symbol, last_error=error_msg)
+            update_worker_state(
+                worker_id, 
+                status=f"Error on {symbol}",
+                errors=worker_states[worker_id].get("errors", 0) + 1
+            )
+            logging.error(f"Worker {worker_id} failed processing {symbol}: {e}", exc_info=True)
+            recent_errors.append(f"[Worker {worker_id}] {symbol}: {error_msg[:100]}")
 
         # Enforce per-key rate limit between company queries too
         countdown_sleep(worker_id, 30)
@@ -279,23 +292,33 @@ def generate_layout() -> Group:
 
 def main():
     console = Console()
-    console.print("[bold green]Starting S&P 500 Media Cloud Article Pipeline[/bold green]")
+    console.print("[bold green]Starting S&P 500 Media Cloud Article Pipeline (Stateful)[/bold green]")
 
     if not API_KEYS:
         console.print("[bold red]Error: No MEDIA_CLOUD_API_KEY_X found.[/bold red]")
         return
 
-    sp500_df = get_sp500_companies()
-    if sp500_df is None:
+    # Fetch unprocessed companies from database
+    console.print("Fetching unprocessed companies from database...")
+    companies_list = get_unprocessed_companies()
+    
+    if not companies_list:
+        console.print("[bold yellow]No unprocessed companies found.[/bold yellow]")
+        console.print("Run 'python scripts/seed_sp500.py' to populate the database.")
         return
 
-    total_companies = len(sp500_df)
-    console.print(f"Found {total_companies} companies.")
+    total_companies = len(companies_list)
+    console.print(f"Found {total_companies} unprocessed companies.")
 
     num_workers = min(3, len(API_KEYS), total_companies)
     console.print(f"Using {num_workers} parallel workers.")
 
-    df_chunks = chunk_dataframe(sp500_df, num_workers)
+    # Split companies list into chunks for workers
+    chunk_size = (total_companies + num_workers - 1) // num_workers
+    company_chunks = [
+        companies_list[i:i + chunk_size] 
+        for i in range(0, total_companies, chunk_size)
+    ]
 
     # Initialize states
     for i in range(num_workers):
@@ -304,9 +327,9 @@ def main():
     with Live(generate_layout(), refresh_per_second=4) as live:
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
             futures = []
-            for worker_id in range(num_workers):
+            for worker_id in range(len(company_chunks)):
                 api_key = API_KEYS[worker_id]
-                companies_chunk = df_chunks[worker_id]
+                companies_chunk = company_chunks[worker_id]
                 futures.append(
                     executor.submit(worker_run, worker_id + 1, api_key, companies_chunk)
                 )

@@ -12,6 +12,10 @@ CREATE TABLE IF NOT EXISTS companies (
     id SERIAL PRIMARY KEY,
     name TEXT NOT NULL,
     symbol TEXT UNIQUE NOT NULL,
+    current_page INTEGER DEFAULT 0,
+    is_processed BOOLEAN DEFAULT FALSE,
+    last_error TEXT,
+    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 

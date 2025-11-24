@@ -251,6 +251,164 @@ def update_article_content(article_id, content, media_outlet_id, social_data_jso
         print(f"Error updating article {article_id}: {e}")
         conn.rollback()
     finally:
+            cursor.close()
+            conn.close()
+
+def seed_sp500_companies(companies_df):
+    """
+    Insert or update SP500 companies in the database with default state.
+    This should be run initially and periodically to keep the company list updated.
+    
+    Args:
+        companies_df: DataFrame with 'Symbol' and 'Company' columns
+    """
+    if companies_df is None or companies_df.empty:
+        print("No companies to seed")
+        return
+    
+    conn = get_db_connection()
+    if not conn:
+        return
+    
+    try:
+        cursor = conn.cursor()
+        values = [
+            (row['Company'], row['Symbol'], 0, False, None)
+            for _, row in companies_df.iterrows()
+        ]
+        
+        # Upsert companies: if symbol exists, update name but preserve state
+        # If new, insert with default state
+        execute_values(
+            cursor,
+            """
+            INSERT INTO companies (name, symbol, current_page, is_processed, last_error)
+            VALUES %s
+            ON CONFLICT (symbol) 
+            DO UPDATE SET name = EXCLUDED.name
+            """,
+            values
+        )
+        
+        conn.commit()
+        print(f"Seeded {len(values)} companies into database")
+    except Exception as e:
+        print(f"Error seeding companies: {e}")
+        conn.rollback()
+    finally:
         if conn:
             cursor.close()
             conn.close()
+
+def get_unprocessed_companies(limit=None):
+    """
+    Fetch companies that haven't been fully processed yet.
+    Returns a list of dicts with company info and state.
+    
+    Args:
+        limit: Optional limit on number of companies to fetch
+    
+    Returns:
+        List of dicts with keys: id, name, symbol, current_page, is_processed, last_error
+    """
+    conn = get_db_connection()
+    if not conn:
+        return []
+    
+    try:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        if limit:
+            query = """
+                SELECT id, name, symbol, current_page, is_processed, last_error, last_updated
+                FROM companies 
+                WHERE is_processed = FALSE
+                ORDER BY last_updated ASC NULLS FIRST
+                LIMIT %s
+            """
+            cursor.execute(query, (limit,))
+        else:
+            query = """
+                SELECT id, name, symbol, current_page, is_processed, last_error, last_updated
+                FROM companies 
+                WHERE is_processed = FALSE
+                ORDER BY last_updated ASC NULLS FIRST
+            """
+            cursor.execute(query)
+        
+        companies = cursor.fetchall()
+        return companies
+    except Exception as e:
+        print(f"Error fetching unprocessed companies: {e}")
+        return []
+    finally:
+        if conn:
+            cursor.close()
+            conn.close()
+
+def update_company_state(symbol, current_page=None, is_processed=None, last_error=None):
+    """
+    Update the processing state for a company.
+    
+    Args:
+        symbol: Company stock symbol
+        current_page: Current page number being processed (optional)
+        is_processed: Whether processing is complete (optional)
+        last_error: Last error message if any (optional)
+    """
+    conn = get_db_connection()
+    if not conn:
+        return
+    
+    try:
+        cursor = conn.cursor()
+        
+        # Build dynamic update query based on provided parameters
+        updates = []
+        params = []
+        
+        if current_page is not None:
+            updates.append("current_page = %s")
+            params.append(current_page)
+        
+        if is_processed is not None:
+            updates.append("is_processed = %s")
+            params.append(is_processed)
+        
+        if last_error is not None:
+            updates.append("last_error = %s")
+            params.append(last_error)
+        
+        if not updates:
+            return  # Nothing to update
+        
+        params.append(symbol)
+        query = f"UPDATE companies SET {', '.join(updates)} WHERE symbol = %s"
+        
+        cursor.execute(query, params)
+        conn.commit()
+    except Exception as e:
+        print(f"Error updating company state for {symbol}: {e}")
+        conn.rollback()
+    finally:
+        if conn:
+            cursor.close()
+            conn.close()
+
+def mark_company_complete(symbol):
+    """
+    Mark a company as fully processed.
+    
+    Args:
+        symbol: Company stock symbol
+    """
+    update_company_state(symbol, is_processed=True, last_error=None)
+
+def reset_company_state(symbol):
+    """
+    Reset a company's processing state (useful for reprocessing).
+    
+    Args:
+        symbol: Company stock symbol
+    """
+    update_company_state(symbol, current_page=0, is_processed=False, last_error=None)
