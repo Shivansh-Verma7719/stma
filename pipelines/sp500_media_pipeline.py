@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import mediacloud.api
 from dotenv import load_dotenv
-from helpers.db_helper import insert_articles
+from helpers.db_helper import insert_articles, get_domain
 
 import logging
 from collections import deque
@@ -46,6 +46,15 @@ US_NATIONAL_COLLECTION = 34412234  # Media Cloud US national collection ID
 # dict keys: "company", "symbol", "status", "articles_found", "errors"
 worker_states: Dict[int, Dict] = {}
 recent_errors = deque(maxlen=5)
+
+# Global metrics tracking
+import threading
+global_metrics_lock = threading.Lock()
+global_metrics = {
+    "total_articles_pushed": 0,
+    "unique_media_outlets": set(),
+    "companies_processed": set(),
+}
 
 
 def get_sp500_companies() -> Optional[pd.DataFrame]:
@@ -202,6 +211,19 @@ def worker_run(worker_id: int, api_key: str, companies_df: pd.DataFrame):
                 found_any = True
                 update_worker_state(worker_id, status=f"Pushing {len(articles_batch)} to DB...")
                 insert_articles(articles_batch)
+                
+                # Update global metrics (articles and media outlets only - companies counted when fully done)
+                with global_metrics_lock:
+                    global_metrics["total_articles_pushed"] += len(articles_batch)
+                    for article in articles_batch:
+                        domain = get_domain(article.get('url'))
+                        if domain:
+                            global_metrics["unique_media_outlets"].add(domain)
+        
+        # Mark company as fully processed after all pages are done
+        with global_metrics_lock:
+            global_metrics["companies_processed"].add(symbol)
+
 
         # Enforce per-key rate limit between company queries too
         countdown_sleep(worker_id, 30)
@@ -210,7 +232,22 @@ def worker_run(worker_id: int, api_key: str, companies_df: pd.DataFrame):
 
 
 def generate_layout() -> Group:
-    table = Table(title="S&P 500 Media Cloud Pipeline", box=box.ROUNDED)
+    # Global metrics panel
+    with global_metrics_lock:
+        metrics_text = f"""[bold cyan]Total Articles Pushed:[/bold cyan] {global_metrics['total_articles_pushed']:,}
+[bold magenta]Unique Media Outlets:[/bold magenta] {len(global_metrics['unique_media_outlets']):,}
+[bold green]Companies Processed:[/bold green] {len(global_metrics['companies_processed']):,}"""
+    
+    metrics_panel = Panel(
+        metrics_text,
+        title="Global Metrics",
+        style="bold white",
+        box=box.DOUBLE,
+        expand=False
+    )
+    
+    # Worker status table
+    table = Table(title="Worker Status", box=box.ROUNDED)
     table.add_column("Worker", justify="center", style="cyan", no_wrap=True)
     table.add_column("Company", style="magenta")
     table.add_column("Symbol", justify="center", style="green")
@@ -230,14 +267,14 @@ def generate_layout() -> Group:
         )
     
     error_panel = Panel(
-        "\n".join(recent_errors),
+        "\n".join(recent_errors) if recent_errors else "No errors",
         title="Recent Errors",
         style="red",
         box=box.ROUNDED,
         height=7
     )
     
-    return Group(table, error_panel)
+    return Group(metrics_panel, table, error_panel)
 
 
 def main():
