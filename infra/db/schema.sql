@@ -7,6 +7,14 @@ CREATE TABLE IF NOT EXISTS media_outlets (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Schema for Companies
+CREATE TABLE IF NOT EXISTS companies (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    symbol TEXT UNIQUE NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Schema for Articles
 CREATE TABLE IF NOT EXISTS articles (
     id SERIAL PRIMARY KEY,
@@ -16,6 +24,7 @@ CREATE TABLE IF NOT EXISTS articles (
     source TEXT,
     published_at TIMESTAMP,
     media_outlet_id INTEGER REFERENCES media_outlets(id),
+    company_id INTEGER REFERENCES companies(id),
     social_data JSONB,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -32,3 +41,8 @@ CREATE TABLE IF NOT EXISTS reddit_posts (
     score INTEGER,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Indexes for performance
+CREATE INDEX IF NOT EXISTS idx_articles_published_at ON articles(published_at);
+CREATE INDEX IF NOT EXISTS idx_articles_company_id ON articles(company_id);
+CREATE INDEX IF NOT EXISTS idx_articles_media_outlet_id ON articles(media_outlet_id);
