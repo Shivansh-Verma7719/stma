@@ -11,7 +11,7 @@ from helpers.db_helper import insert_articles
 
 load_dotenv()
 
-MEDIA_CLOUD_API_KEY = os.getenv("MEDIA_CLOUD_API_KEY")
+MEDIA_CLOUD_API_KEY = os.getenv("MEDIA_CLOUD_API_KEY_1")
 START_DATE = dt.date(2015, 1, 1)
 END_DATE = dt.date(2025, 11, 12)
 # ID for US National Collection in Media Cloud
