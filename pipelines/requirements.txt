@@ -6,4 +6,5 @@ psycopg2-binary
 python-dotenv
 newspaper3k
 beautifulsoup4
+rich
 lxml_html_clean
