@@ -1,20 +1,16 @@
+import pandas as pd
 import requests
-import csv
-import json
 import time
-import datetime
-from dateutil.relativedelta import relativedelta
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock
+from datetime import datetime
 import os
-import sys
+import math # Import math for ceil function
 
-# --- CONFIGURATION ---
-COMPANY_CSV_PATH = 'data/sp500.csv'
-OUTPUT_FILE = 'reddit_data.jsonl' # JSONL is the best format (one JSON object per line)
-LOG_FILE = 'fetch_log.txt' # To log errors and progress
+# --- Configuration ---
 
-# List of subreddits to search within
+# PullPush API endpoint for submissions search
+BASE_URL = "https://api.pullpush.io/reddit/search/submission/"
+
+# List of subreddits to search
 SUBREDDIT_LIST = [
     'wallstreetbets',
     'stocks',
@@ -33,231 +29,192 @@ SUBREDDIT_LIST = [
     'ValueInvesting'
 ]
 
-# Timeframe
-YEARS_TO_FETCH = 10
-START_DATE = datetime.datetime.now() - relativedelta(years=YEARS_TO_FETCH)
-END_DATE = datetime.datetime.now()
+# Time parameters
+TIME_FRAME_YEARS = 5
+SECONDS_IN_YEAR = 365 * 24 * 60 * 60
+FIVE_YEARS_AGO_EPOCH = int(time.time() - (TIME_FRAME_YEARS * SECONDS_IN_YEAR))
 
-# Parallelism
-# This is 'n', the number of parallel jobs to run.
-# Start with 10-15. You can increase if the API doesn't rate-limit you.
-MAX_WORKERS = 15
+# API Request Limits
+MAX_RETRIES = 5
+SLEEP_TIME = 2  # Initial sleep time between retries/pages (seconds)
+RESULTS_PER_PAGE = 100  # Max results to fetch per API call (safe limit)
 
-# API
-BASE_URL = "https://api.pullpush.io/reddit/search/submission/"
-REQUEST_TIMEOUT = 30  # seconds
-RETRY_ATTEMPTS = 3
-RETRY_DELAY = 5 # seconds
+# File Paths
+INPUT_CSV = 'data/sp500.csv'
+OUTPUT_CSV = 'data/reddit_submissions.csv'
 
-# --- END CONFIGURATION ---
+# --- Utility Functions ---
 
-# A thread-safe lock for writing to files
-# This ensures two threads don't write to the same file at the exact same time
-FILE_LOCK = Lock()
-
-def log_message(message):
-    """Logs a message to the console and a log file in a thread-safe way."""
-    timestamp = datetime.datetime.now().isoformat()
-    log_entry = f"[{timestamp}] {message}"
-    print(log_entry)
-    with FILE_LOCK:
-        with open(LOG_FILE, 'a', encoding='utf-8') as f:
-            f.write(log_entry + '\n')
-
-def load_companies_from_csv(csv_path):
+def fetch_submissions(query_keyword, subreddit_name, start_time_epoch, symbol):
     """
-    Loads company and keyword data from the CSV file.
-    Returns:
-        list: A list of dictionaries, e.g.,
-              [{'company': 'Apple', 'keywords': ['AAPL', 'iPhone', ...]}, ...]
+    Fetches submissions from the PullPush API for a specific keyword and time range,
+    for a SINGLE subreddit, handling pagination and retries.
     """
-    if not os.path.exists(csv_path):
-        log_message(f"CRITICAL ERROR: Company CSV not found at {csv_path}")
-        sys.exit(1)
+    all_data = []
+    
+    # The 'before' parameter is used for pagination, starting from 'now' and moving backwards.
+    current_before_epoch = int(time.time()) 
+    
+    print(f"  > Searching for keyword: '{query_keyword}' in subreddit: r/{subreddit_name}...")
 
-    companies = []
-    with open(csv_path, 'r', encoding='utf-8-sig') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            company_name = row.get('Security')
-            symbol = row.get('Symbol')
-            
-            if company_name and symbol:
-                # Use both Symbol and Company Name as keywords
-                keywords = [symbol, company_name]
-                companies.append({'company': company_name, 'keywords': keywords})
-    log_message(f"Loaded {len(companies)} companies from CSV.")
-    return companies
+    # Pagination loop: runs as long as the 'before' timestamp is newer than the 5-year limit
+    while current_before_epoch > start_time_epoch:
+        
+        # Construct the URL parameters
+        params = {
+            'q': query_keyword,
+            'subreddit': subreddit_name, # Only a single subreddit name here
+            'size': RESULTS_PER_PAGE,
+            'after': start_time_epoch, 
+            'before': current_before_epoch,
+            'sort': 'desc', # sort by newest first (descending timestamp)
+            'sort_type': 'created_utc'
+        }
 
-def generate_time_chunks(start_date, end_date):
-    """
-    Generates monthly (start_timestamp, end_timestamp) tuples
-    from the start date to the end date.
-    """
-    chunks = []
-    current_date = start_date
-    while current_date < end_date:
-        next_date = current_date + relativedelta(months=1)
-        start_ts = int(current_date.timestamp())
-        end_ts = int(next_date.timestamp()) - 1
-        chunks.append((start_ts, end_ts))
-        current_date = next_date
-    log_message(f"Generated {len(chunks)} monthly time chunks from {start_date} to {end_date}.")
-    return chunks
+        retries = 0
+        success = False
+        data = None
 
-def create_job_queue(companies, subreddits, time_chunks):
-    """
-    Creates a master list of all jobs to be executed.
-    Each job is a dictionary.
-    """
-    job_queue = []
-    for company in companies:
-        for keyword in company['keywords']:
-            for subreddit in subreddits:
-                for start_ts, end_ts in time_chunks:
-                    job = {
-                        'company': company['company'],
-                        'keyword': keyword,
-                        'subreddit': subreddit,
-                        'start_ts': start_ts,
-                        'end_ts': end_ts,
-                        'filename': f"{company['company']}_{keyword}_{subreddit}_{start_ts}.json"
-                    }
-                    job_queue.append(job)
-    log_message(f"Created a total job queue of {len(job_queue)} tasks.")
-    return job_queue
-
-def fetch_job(session, job):
-    """
-    The main function for each thread.
-    Fetches data for a single job and returns the fetched posts.
-    """
-    params = {
-        'q': job['keyword'],
-        'subreddit': job['subreddit'],
-        'after': job['start_ts'],
-        'before': job['end_ts'],
-        'fields': ['id', 'created_utc', 'title', 'selftext', 'subreddit', 'score', 'num_comments', 'permalink', 'url'],
-        'size': 100, # Max allowed by API
-        'sort': 'desc',
-        'sort_type': 'created_utc'
-    }
-
-    all_posts_for_this_job = []
-    current_timestamp = job['end_ts']
-
-    # We loop *within* the job to handle pagination
-    # The API only returns 100 posts at a time. We keep fetching
-    # until no more posts are returned for this time window.
-    while True:
-        params['before'] = current_timestamp
-
-        for attempt in range(RETRY_ATTEMPTS):
+        # Retry loop with exponential backoff
+        while retries < MAX_RETRIES:
             try:
-                response = session.get(BASE_URL, params=params, timeout=REQUEST_TIMEOUT)
-
-                if response.status_code == 200:
-                    data = response.json().get('data', [])
-                    if not data:
-                        # No more data for this job, break the pagination loop
-                        return job, all_posts_for_this_job
-
-                    all_posts_for_this_job.extend(data)
-
-                    # Set the 'before' timestamp to the oldest post we just received
-                    # to get the *next* page
-                    current_timestamp = data[-1]['created_utc']
-                    time.sleep(0.5) # Small delay to be nice to the API
-                    break # Success, break the retry loop
-
-                elif response.status_code == 429: # Too Many Requests
-                    log_message(f"WARNING: Rate limited. Job: {job['keyword']}/{job['subreddit']}. Sleeping for 60s.")
-                    time.sleep(60)
-                else:
-                    log_message(f"WARNING: API returned status {response.status_code} for job {job['keyword']}/{job['subreddit']}. Retrying...")
-                    time.sleep(RETRY_DELAY * (attempt + 1)) # Exponential backoff
-
+                # Use a small timeout to quickly retry on connection issues
+                response = requests.get(BASE_URL, params=params, timeout=10)
+                response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+                data = response.json().get('data', [])
+                success = True
+                break
+            except requests.exceptions.HTTPError as e:
+                # Since we resolved the URL length issue, this should be mostly rate limit (429) or other API issues
+                # Note: The 400 error will still occur if 'subreddit' is empty, but we ensure it's not here.
+                print(f"    [Error] HTTP Error: {e}. Retrying in {SLEEP_TIME * (2 ** retries)}s...")
             except requests.exceptions.RequestException as e:
-                log_message(f"ERROR: Request failed for job {job['keyword']}/{job['subreddit']}: {e}. Retrying...")
-                time.sleep(RETRY_DELAY * (attempt + 1))
-        else:
-            # All retries failed
-            log_message(f"CRITICAL: All retries failed for job: {job['keyword']}/{job['subreddit']}. Skipping this job.")
-            return job, [] # Return empty list for this failed job
+                print(f"    [Error] Connection Error: {e}. Retrying in {SLEEP_TIME * (2 ** retries)}s...")
 
-    return job, all_posts_for_this_job
+            time.sleep(SLEEP_TIME * (2 ** retries))
+            retries += 1
+        
+        if not success:
+            print(f"    [FAILURE] Max retries reached for '{query_keyword}' in r/{subreddit_name}. Moving on.")
+            break
+        
+        if not data:
+            # No more data in this time slice, we are done
+            break
 
-def save_results(job, posts):
-    """
-    Saves the results of a completed job to the main JSONL file.
-    This is called by the main thread, so it uses the file lock for safety.
-    """
-    if not posts:
-        return # Don't save empty results
+        # Process the fetched data
+        new_records = []
+        for post in data:
+            new_records.append({
+                'Symbol': symbol,
+                'Keyword': query_keyword,
+                'Subreddit': post.get('subreddit'),
+                'Title': post.get('title'),
+                'URL': post.get('full_link'),
+                'Score': post.get('score'),
+                'Created_UTC': post.get('created_utc'),
+                'Date': datetime.fromtimestamp(post.get('created_utc')).strftime('%Y-%m-%d %H:%M:%S')
+            })
 
-    with FILE_LOCK:
-        with open(OUTPUT_FILE, 'a', encoding='utf-8') as f:
-            for post in posts:
-                # Add our own metadata
-                record = {
-                    'company': job['company'],
-                    'keyword_searched': job['keyword'],
-                    'post_data': post
-                }
-                f.write(json.dumps(record) + '\n')
+        all_data.extend(new_records)
+
+        # Update the 'before' time for the next iteration (get the timestamp of the oldest post)
+        current_before_epoch = data[-1]['created_utc'] - 1 # Subtract 1 second to avoid duplicates
+        
+        # Print progress and take a quick break to be polite to the API
+        newest_post_date = datetime.fromtimestamp(data[0]['created_utc']).strftime('%Y-%m-%d')
+        oldest_post_date = datetime.fromtimestamp(data[-1]['created_utc']).strftime('%Y-%m-%d')
+        print(f"    - Fetched {len(data)} posts. Range: {oldest_post_date} to {newest_post_date}. Total: {len(all_data)}")
+        
+        # We increase the sleep time slightly here since we're making many small requests
+        time.sleep(SLEEP_TIME)
+
+    return all_data
+
+# --- Main Script Execution ---
 
 def main():
-    """Main function to orchestrate the parallel fetching."""
-    log_message("--- Starting Parallel Reddit Fetcher ---")
-
-    # 1. Load and Generate Inputs
-    companies = load_companies_from_csv(COMPANY_CSV_PATH)
-    time_chunks = generate_time_chunks(START_DATE, END_DATE)
-    job_queue = create_job_queue(companies, SUBREDDIT_LIST, time_chunks)
-
-    if not job_queue:
-        log_message("No jobs to run. Exiting.")
+    """
+    Main function to orchestrate the data fetching process.
+    """
+    print("--- Reddit Submissions Fetcher (PullPush API) ---")
+    print(f"Searching {len(SUBREDDIT_LIST)} subreddits for posts in the last {TIME_FRAME_YEARS} years.")
+    print(f"Start Time (Epoch): {FIVE_YEARS_AGO_EPOCH}")
+    
+    if not os.path.exists(INPUT_CSV):
+        print(f"\n[ERROR] Input CSV file '{INPUT_CSV}' not found. Please create it first.")
         return
 
-    log_message(f"Starting {len(job_queue)} jobs with {MAX_WORKERS} parallel workers...")
+    try:
+        # 1. Read company data
+        company_data = pd.read_csv(INPUT_CSV)
+        
+        # List to hold all collected submissions
+        all_submissions_df = pd.DataFrame()
 
-    # We use one ThreadPoolExecutor and one Session
-    # to share connections across all threads (much faster).
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor, requests.Session() as session:
+        # 2. Iterate through each company
+        for index, row in company_data.iterrows():
+            symbol = str(row['Symbol']).strip()
+            security = str(row['Security']).strip()
+            
+            print(f"\n[COMPANY {index+1}/{len(company_data)}] Processing {symbol} ({security})...")
 
-        # Submit all jobs to the executor
-        # We create a dictionary mapping a 'future' (the running job)
-        # to the job info itself, so we know which job finished.
-        futures = {executor.submit(fetch_job, session, job): job for job in job_queue}
+            # 3. Define keywords to search: Symbol and Security name
+            keywords = [symbol]
+            if symbol.lower() != security.lower():
+                 keywords.append(security)
+            
+            company_submissions = []
 
-        completed_count = 0
-        total_jobs = len(futures)
+            # 4. Fetch data for each keyword, iterating over subreddits one by one
+            for keyword in keywords:
+                
+                # We skip very short/generic keywords that are not the symbol
+                if len(keyword) > 2:
+                    
+                    # Iterate through the full subreddit list, one subreddit at a time
+                    for subreddit_name in SUBREDDIT_LIST:
+                        # Call the fetching function with the single subreddit
+                        results = fetch_submissions(keyword, subreddit_name, FIVE_YEARS_AGO_EPOCH, symbol)
+                        company_submissions.extend(results)
 
-        # Use as_completed to process results as soon as they are done
-        # This is much more memory-efficient than waiting for all jobs.
-        for future in as_completed(futures):
-            job = futures[future]
-
-            try:
-                # Get the result from the thread
-                original_job, posts_data = future.result()
-
-                if posts_data:
-                    save_results(original_job, posts_data)
-                    log_message(f"[{completed_count}/{total_jobs}] SUCCESS: Saved {len(posts_data)} posts for job: {original_job['company']}/{original_job['keyword']}/{original_job['subreddit']}/{original_job['start_ts']}")
                 else:
-                    log_message(f"[{completed_count}/{total_jobs}] INFO: No data found for job: {original_job['company']}/{original_job['keyword']}/{original_job['subreddit']}/{original_job['start_ts']}")
+                    print(f"  > Skipping short/generic keyword: '{keyword}'")
 
-            except Exception as e:
-                log_message(f"CRITICAL: Job {job['company']}/{job['keyword']} failed in main loop: {e}")
 
-            completed_count += 1
+            # 5. Convert to DataFrame and append
+            if company_submissions:
+                df = pd.DataFrame(company_submissions)
+                all_submissions_df = pd.concat([all_submissions_df, df], ignore_index=True)
+            
+            # Using drop_duplicates here to count unique posts collected across all keywords and subreddits for this company
+            unique_posts_count = len(all_submissions_df.drop_duplicates(subset=['URL', 'Title', 'Created_UTC']))
+            print(f"\n--- {symbol} DONE. Total unique posts collected so far: {unique_posts_count}")
 
-    log_message("--- All jobs complete. ---")
 
-if __name__ == "__main__":
-    # Clear log file on new run
-    if os.path.exists(LOG_FILE):
-        os.remove(LOG_FILE)
+        # 6. Final cleanup and saving
+        if not all_submissions_df.empty:
+            # Remove duplicate posts
+            final_df = all_submissions_df.drop_duplicates(subset=['URL', 'Title', 'Created_UTC']).reset_index(drop=True)
+            final_df = final_df.sort_values(by='Created_UTC', ascending=False)
+            
+            # Save the final DataFrame to a CSV file
+            final_df.to_csv(OUTPUT_CSV, index=False)
+            
+            print(f"\n=======================================================")
+            print(f"✅ Success! Total unique submissions collected: {len(final_df)}")
+            print(f"Data saved to '{OUTPUT_CSV}'")
+            print(f"=======================================================")
+        else:
+            print("\n[INFO] No submissions were collected.")
 
+    except Exception as e:
+        print(f"\n[FATAL ERROR] An unexpected error occurred: {e}")
+
+if __name__ == '__main__':
+    # Initialize the app ID context (standard practice in this environment)
+    appId = 'default-app-id' 
+    if 'appId' in locals():
+      appId = appId 
+    
     main()
