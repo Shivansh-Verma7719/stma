@@ -1,0 +1,48 @@
+postgres@cloud:~$ sudo -u postgres psql
+postgres is not in the sudoers file.
+postgres@cloud:~$ sudo nano /etc/postgresql/12/main/postgresql.conf
+[sudo] password for postgres: 
+sudo: a password is required
+postgres@cloud:~$ exit
+logout
+cloud@cloud:~$ sudo nano /etc/postgresql/12/main/postgresql.conf
+[sudo] password for cloud: 
+cloud@cloud:~$ sudo -u postgres psql -c "SHOW config_file;"
+               config_file               
+-----------------------------------------
+ /etc/postgresql/16/main/postgresql.conf
+(1 row)
+
+cloud@cloud:~$ sudo -u postgres psql -c "SHOW data_directory;"
+       data_directory        
+-----------------------------
+ /var/lib/postgresql/16/main
+(1 row)
+
+cloud@cloud:~$ sudo nano /etc/postgresql/16/main/postgresql.conf
+cloud@cloud:~$ sudo nano /etc/postgresql/16/main/postgresql.conf
+
+  GNU nano 7.2         /etc/postgresql/16/main/postgresql.conf                  
+
+# The default values of these variables are driven from the -D command-line
+# option or PGDATA environment variable, represented here as ConfigDir.
+
+data_directory = '/var/lib/postgresql/16/main'          # use data in another d>
+                                        # (change requires restart)
+hba_file = '/etc/postgresql/16/main/pg_hba.conf'        # host-based authentica>
+                                        # (change requires restart)
+ident_file = '/etc/postgresql/16/main/pg_ident.conf'    # ident configuration f>
+                                        # (change requires restart)
+
+# If external_pid_file is not explicitly set, no extra PID file is written.
+external_pid_file = '/var/run/postgresql/16-main.pid'                   # write>
+                                        # (change requires restart)
+
+
+#------------------------------------------------------------------------------
+# CONNECTIONS AND AUTHENTICATION
+#------------------------------------------------------------------------------
+
+
+^G Help      ^O Write Out ^W Where Is  ^K Cut       ^T Execute   ^C Location
+^X Exit      ^R Read File ^\ Replace   ^U Paste     ^J Justify   ^/ Go To Line
