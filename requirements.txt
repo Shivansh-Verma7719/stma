@@ -1,0 +1,12 @@
+pandas
+requests
+python-dotenv
+psycopg2-binary
+mediacloud
+rich
+newspaper3k
+beautifulsoup4
+transformers
+matplotlib
+seaborn
+constructs
