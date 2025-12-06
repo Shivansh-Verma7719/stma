@@ -10,6 +10,7 @@ import datetime as dt
 from urllib.parse import urlparse
 from collections import deque
 from typing import List, Dict, Optional
+import queue
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Semaphore, Lock
@@ -34,8 +35,9 @@ from rich import box
 
 load_dotenv()
 
-NUM_WORKERS = int(os.getenv('NUM_WORKERS', 10))  # Configurable via env var, default 16
-BATCH_SIZE = int(os.getenv('BATCH_SIZE', 30))  # Smaller batches for memory efficiency
+NUM_WORKERS = int(os.getenv('NUM_WORKERS', 5))  # Configurable via env var, default 16
+BATCH_SIZE = int(os.getenv('BATCH_SIZE', 30))  # Local batch size for processing/pushing
+PRODUCER_BATCH_SIZE = 500  # Large batch size for DB fetching
 PUSH_BATCH_SIZE = int(os.getenv('PUSH_BATCH_SIZE', 80))  # Async push threshold
 REQUEST_TIMEOUT = int(os.getenv('REQUEST_TIMEOUT', 20))  # Timeout per article
 MAX_RETRIES = int(os.getenv('MAX_RETRIES', 3))  # Max retry attempts
@@ -103,6 +105,9 @@ push_semaphore = Semaphore(1)
 # Rate limit tracking per domain
 rate_limit_state_lock = Lock()
 rate_limit_state = {}  # domain -> {'blocked_until': timestamp, 'delay': seconds}
+
+# Shared queue for articles
+article_queue = queue.Queue(maxsize=1000)
 
 
 # ============================================================================
@@ -244,6 +249,51 @@ def countdown_sleep(worker_id: int, seconds: int, reason: str = "Rate Limit"):
 
 
 # ============================================================================
+# Producer Thread
+# ============================================================================
+
+def producer_run():
+    """
+    Producer thread that fetches large batches of articles from DB
+    and populates the shared work queue.
+    """
+    logging.info("Producer thread started.")
+    total_fetched = 0
+    
+    try:
+        while True:
+            # Fetch large batch
+            # We use a larger batch size here to minimize DB round trips
+            articles = get_articles_for_scraping(batch_size=PRODUCER_BATCH_SIZE, max_retries=MAX_RETRIES)
+            
+            if not articles:
+                logging.info("Producer found no more articles. Exiting loop.")
+                break
+            
+            count = len(articles)
+            total_fetched += count
+            logging.info(f"Producer fetched {count} articles. Queueing...")
+            
+            for article in articles:
+                article_queue.put(article)
+            
+            # If we fetched less than requested, we might be running out, so sleep a bit
+            if count < PRODUCER_BATCH_SIZE:
+                time.sleep(2)
+            else:
+                # Slight delay to allow workers to catch up if queue is getting full, 
+                # though queue.put will block if full regardless.
+                time.sleep(0.1)
+                
+    except Exception as e:
+        logging.error(f"Producer thread error: {e}", exc_info=True)
+    finally:
+        # Signal termination to workers
+        logging.info(f"Producer finished. Total fetched: {total_fetched}. sending sentinels.")
+        for _ in range(NUM_WORKERS):
+            article_queue.put(None)
+
+# ============================================================================
 # Worker and Batch Processing
 # ============================================================================
 
@@ -260,8 +310,6 @@ def process_article_batch(articles_batch: List[Dict], worker_id: int) -> List[Di
         article_id = article['id']
         url = article['url']
         source = article.get('source', '')
-        
-        update_worker_state(worker_id, status=f"Scraping {url[:60]}...")
         
         # Small delay between articles to avoid rate limiting
         time.sleep(DELAY_BETWEEN_ARTICLES)
@@ -373,9 +421,13 @@ def process_article_batch(articles_batch: List[Dict], worker_id: int) -> List[Di
             
             with global_metrics_lock:
                 global_metrics['failed_scrapes'] += 1
-                global_metrics['total_articles_processed'] += 1
     
     return updates
+
+def process_single_article(article: Dict, worker_id: int) -> List[Dict]:
+    """Process a single article and return update dict in a list."""
+    # Reuse existing batch logic but for list of 1 to minimize code change risk
+    return process_article_batch([article], worker_id)
 
 
 def async_push_batch():
@@ -403,80 +455,100 @@ def async_push_batch():
 def worker_run(worker_id: int):
     """
     Main worker thread function.
-    Continuously fetches and processes article batches.
-    On subsequent passes, retries articles that hit rate limits.
+    Consumes articles from the shared queue.
     """
     update_worker_state(worker_id, status="Starting...")
     
-    total_processed = 0
-    pass_number = 0
+    total_processed_by_worker = 0
     
     try:
         while True:
-            pass_number += 1
-            
-            # On pass 2+, retry rate-limited articles first
-            if pass_number > 1:
+            try:
+                # queue.get with timeout to allow checking for rate-limits periodically
+                item = article_queue.get(timeout=2)
+            except queue.Empty:
+                # usage of timeout allows us to loop back and maybe retry rate limits or just wait
+                update_worker_state(worker_id, status="Idle (Queue Empty)")
+                
+                # Check global rate limit queue occasionally even if main queue is empty
                 with global_metrics_lock:
                     if global_metrics['rate_limited_queue']:
-                        retry_articles = []
-                        while global_metrics['rate_limited_queue'] and len(retry_articles) < BATCH_SIZE // 2:
-                            article = global_metrics['rate_limited_queue'].popleft()
-                            retry_articles.append({
-                                'id': article['id'],
-                                'url': article['url'],
-                                'source': article['source'],
-                                'published_at': None,
-                                'company_id': None
-                            })
+                        # Pop one and process
+                        retry_art = global_metrics['rate_limited_queue'].popleft()
+                        # Construct article dict
+                        r_article = {
+                             'id': retry_art['id'],
+                             'url': retry_art['url'],
+                             'source': retry_art['source'],
+                             'published_at': None,
+                             'company_id': None
+                        }
+                        update_worker_state(worker_id, status=f"Retrying {r_article['url'][:40]}...")
+                        # Process immediately
+                        updates = process_single_article(r_article, worker_id)
+                        with global_metrics_lock:
+                            global_metrics['pending_push'].extend(updates)
+                            # Note: total_articles_processed is incremented inside process_single_article via process_article_batch
+                        total_processed_by_worker += 1
+                        update_worker_state(worker_id, articles_processed=total_processed_by_worker)
                         
-                        if retry_articles:
-                            update_worker_state(worker_id, status=f"Retrying {len(retry_articles)} rate-limited...")
-                            updates = process_article_batch(retry_articles, worker_id)
-                            with global_metrics_lock:
-                                global_metrics['pending_push'].extend(updates)
-                                global_metrics['total_articles_processed'] += len(retry_articles)
-                            
-                            if len(global_metrics['pending_push']) >= PUSH_BATCH_SIZE:
-                                async_push_batch()
-            
-            # Fetch next batch of articles to scrape
-            update_worker_state(worker_id, status="Fetching batch...")
-            articles_batch = get_articles_for_scraping(batch_size=BATCH_SIZE, max_retries=MAX_RETRIES)
-            
-            if not articles_batch:
-                # No more articles to process
-                update_worker_state(worker_id, status="No more articles")
+                        # Push batch if needed
+                        if len(global_metrics['pending_push']) >= PUSH_BATCH_SIZE:
+                            async_push_batch()
+                continue
+
+            if item is None:
+                # Sentinel received
+                article_queue.task_done()
                 break
             
-            batch_size = len(articles_batch)
-            update_worker_state(
-                worker_id,
-                status=f"Processing {batch_size} articles...",
-                articles_pending_push=batch_size
-            )
+            article = item
             
-            # Process each article in the batch
-            updates = process_article_batch(articles_batch, worker_id)
+            # Process the article
+            update_worker_state(worker_id, status=f"Scraping {article['url'][:40]}...")
             
-            # Add updates to pending queue
+            updates = process_single_article(article, worker_id)
+            
+            # Aggregate updates
             with global_metrics_lock:
                 global_metrics['pending_push'].extend(updates)
-                global_metrics['total_articles_processed'] += batch_size
+                # global_metrics['total_articles_processed'] is incremented inside process_single_article via process_article_batch
             
-            # Push batch if it exceeds threshold
+            article_queue.task_done()
+            total_processed_by_worker += 1
+            update_worker_state(worker_id, articles_processed=total_processed_by_worker)
+            
+            # Push batch if needed
             if len(global_metrics['pending_push']) >= PUSH_BATCH_SIZE:
                 async_push_batch()
-            
-            update_worker_state(worker_id, articles_processed=total_processed + batch_size)
-            total_processed += batch_size
-            
-            # Light delay between batches (HPC: many threads, less contention)
-            time.sleep(0.5)
-        
-        # Push any remaining updates on worker exit
-        async_push_batch()
-        
+
+            # Handle rate limited retries periodically
+            # Let's check retry queue every ~10 articles
+            if total_processed_by_worker % 10 == 0:
+                 with global_metrics_lock:
+                    if global_metrics['rate_limited_queue']:
+                        # Pop one and process
+                        retry_art = global_metrics['rate_limited_queue'].popleft()
+                        # Construct article dict
+                        r_article = {
+                             'id': retry_art['id'],
+                             'url': retry_art['url'],
+                             'source': retry_art['source'],
+                             'published_at': None,
+                             'company_id': None
+                        }
+                        update_worker_state(worker_id, status=f"Retrying {r_article['url'][:40]}...")
+                        # Process immediately
+                        updates = process_single_article(r_article, worker_id)
+                        global_metrics['pending_push'].extend(updates)
+                        # Note: total_articles_processed is incremented inside process_single_article via process_article_batch
+                        total_processed_by_worker += 1
+                        update_worker_state(worker_id, articles_processed=total_processed_by_worker)
+                        
+                        # Push batch if needed
+                        if len(global_metrics['pending_push']) >= PUSH_BATCH_SIZE:
+                            async_push_batch()
+
     except Exception as e:
         error_msg = str(e)[:200]
         update_worker_state(worker_id, status=f"Fatal error: {error_msg}")
@@ -484,8 +556,7 @@ def worker_run(worker_id: int):
         recent_errors.append(f"[W{worker_id}] Fatal: {error_msg}")
     finally:
         update_worker_state(worker_id, status="Done")
-
-
+        
 # ============================================================================
 # Progress Monitoring
 # ============================================================================
@@ -563,6 +634,7 @@ def main():
     console.print(f"[bold cyan]HPC Configuration:[/bold cyan]")
     console.print(f"  Workers: {NUM_WORKERS} threads")
     console.print(f"  Batch Size: {BATCH_SIZE} articles/fetch")
+    console.print(f"  Producer Batch Size: {PRODUCER_BATCH_SIZE} articles/db_fetch")
     console.print(f"  DB Push Threshold: {PUSH_BATCH_SIZE}")
     console.print(f"  Request Timeout: {REQUEST_TIMEOUT}s")
     console.print(f"  Delay Between Articles: {DELAY_BETWEEN_ARTICLES}s")
@@ -582,7 +654,10 @@ def main():
     for i in range(1, NUM_WORKERS + 1):
         update_worker_state(i, status="Waiting to start...")
     
-    # Run workers
+    # Start Producer
+    producer = threading.Thread(target=producer_run, name="Producer", daemon=True)
+    producer.start()
+
     is_interactive = sys.stdout.isatty()
     
     if is_interactive:
@@ -602,7 +677,8 @@ def main():
                     while True:
                         live.update(generate_layout())
                         
-                        if all(f.done() for f in futures):
+                        # Check if producer is done and all workers have received sentinels
+                        if not producer.is_alive() and article_queue.empty() and all(f.done() for f in futures):
                             break
                         
                         time.sleep(0.5)
@@ -625,7 +701,8 @@ def main():
                     last_scraped_total = initial_scraped_db
                     
                     while True:
-                        if all(f.done() for f in futures):
+                        # Check if producer is done and all workers have received sentinels
+                        if not producer.is_alive() and article_queue.empty() and all(f.done() for f in futures):
                             break
                         
                         current_progress = get_scraping_progress()
@@ -637,13 +714,16 @@ def main():
                             pbar.update(delta)
                             last_scraped_total = current_scraped_total
                         
-                        # Update postfix with session stats
+                        # Update postfix with all dashboard metrics
+                        # Dashboard: Total, Scraped, Pending, Retryable, Session, Success, Failed, RateLimit, Buffer
                         pbar.set_postfix({
+                            'Pending': f"{current_progress.get('pending_articles', 0):,}",
+                            'Retryable': f"{current_failed:,}",
                             'Session': f"{global_metrics['total_articles_processed']:,}",
                             'Success': f"{global_metrics['successful_scrapes']:,}",
                             'Fail': f"{global_metrics['failed_scrapes']:,}",
                             'RateLimit': f"{global_metrics['rate_limited_articles']:,}",
-                            'Q': len(global_metrics['pending_push'])
+                            'Buffer': len(global_metrics['pending_push'])
                         })
                         
                         time.sleep(5)
@@ -657,10 +737,18 @@ def main():
         
         except KeyboardInterrupt:
             console.print("\n[bold yellow]Keyboard interrupt detected. Shutting down gracefully...[/bold yellow]")
+            # Attempt to stop producer if it's still running (daemon thread will exit with main)
+            # For a clean shutdown, you might need a global shutdown event for the producer.
             executor.shutdown(wait=True)
             console.print("[bold green]Shutdown complete.[/bold green]")
             return
     
+    # Ensure all items put into the queue by the producer have been processed by workers
+    article_queue.join() 
+    
+    # Push any remaining updates on exit
+    async_push_batch()
+
     # Final statistics
     console.print("\n[bold green]All workers finished.[/bold green]")
     final_progress = get_scraping_progress()
