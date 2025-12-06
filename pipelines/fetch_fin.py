@@ -1,20 +1,13 @@
 import pandas as pd
 import yfinance as yf
 import os
-import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- Configuration ---
-INPUT_FILE = "sp500.csv"  # The file containing the list of tickers
-OUTPUT_DIR = "data"  # Directory to save the CSV files
-YEARS_BACK = 10  # How many years of history to fetch
-MAX_WORKERS = 10  # Number of simultaneous downloads
+OUTPUT_DIR = "/Users/arnav/Desktop/workspaces/stma/stma/fin_data"
 
-
-def get_date_range():
-    end_date = datetime.date.today()
-    start_date = end_date - datetime.timedelta(days=YEARS_BACK * 365)
-    return start_date, end_date
+# Fixed Date Range
+START_DATE = "2015-11-30"
+END_DATE = "2025-11-24"
 
 
 def sanitize_ticker(ticker):
@@ -27,114 +20,76 @@ def sanitize_ticker(ticker):
     return str(ticker)
 
 
-def process_ticker(ticker, start_date, end_date):
-    """
-    Downloads and formats data for a single ticker.
-    Returns a status message string.
-    """
+def fetch_single_ticker(ticker):
     clean_ticker = sanitize_ticker(ticker)
+
+    # Ensure directory exists
+    if not os.path.exists(OUTPUT_DIR):
+        os.makedirs(OUTPUT_DIR)
+
     file_path = os.path.join(OUTPUT_DIR, f"{clean_ticker}.csv")
 
-    # CHECK: Skip if file already exists
-    if os.path.exists(file_path):
-        return f"Skipped {clean_ticker}: Already downloaded."
+    print(f"Fetching data for: {clean_ticker}...")
+    print(f"Range: {START_DATE} to {END_DATE}")
 
     try:
-        # Download daily data
-        # auto_adjust=True: OHLC is adjusted for splits/dividends.
+        # Download data
         stock_data = yf.download(
             clean_ticker,
-            start=start_date,
-            end=end_date,
+            start=START_DATE,
+            end=END_DATE,
             interval="1d",
-            progress=False,
+            progress=True,
             auto_adjust=True,
         )
 
         if stock_data.empty:
-            return f"Warning: No data found for {clean_ticker}"
+            print(f"❌ Error: No data found for {clean_ticker}. Check the spelling.")
+            return
 
-        # --- DATA CLEANING & FORMATTING ---
+        # --- DATA CLEANING ---
 
-        # 1. Handle MultiIndex Columns (flatten them)
+        # 1. Handle MultiIndex Columns
         if isinstance(stock_data.columns, pd.MultiIndex):
-            # Keep only the top level (Price) and drop the Ticker level
             stock_data.columns = stock_data.columns.get_level_values(0)
 
         # 2. Remove Duplicate Columns
-        # This fixes issues where columns might appear twice (e.g. Open, Open)
         stock_data = stock_data.loc[:, ~stock_data.columns.duplicated()]
 
-        # 3. Reset Index to make 'Date' a proper column
+        # 3. Reset Index
         stock_data.reset_index(inplace=True)
 
-        # 4. Ensure 'Date' column is formatted as YYYY-MM-DD
+        # 4. Format Date
         if "Date" in stock_data.columns:
             stock_data["Date"] = pd.to_datetime(stock_data["Date"]).dt.date
 
-        # 5. STRICT COLUMN SELECTION & ORDERING
+        # 5. STRICT COLUMN SELECTION
         desired_columns = ["Date", "Open", "High", "Low", "Close", "Volume"]
 
-        # Check if we have all necessary columns
+        # Check for missing columns
         missing_cols = [c for c in desired_columns if c not in stock_data.columns]
         if missing_cols:
-            return f"Error {clean_ticker}: Missing columns {missing_cols}"
+            print(f"❌ Error: Missing columns {missing_cols}")
+            return
 
-        # Select exactly these 6 columns in this order
+        # Select and Reorder
         stock_data = stock_data[desired_columns]
 
-        # 6. Save to CSV (index=False prevents the 0,1,2... row numbers)
+        # 6. Save to CSV
         stock_data.to_csv(file_path, index=False)
 
-        return f"Successfully downloaded {clean_ticker}"
+        print(f"✅ Success! Saved to: {file_path}")
+        print(f"   Rows retrieved: {len(stock_data)}")
 
     except Exception as e:
-        return f"Error downloading {clean_ticker}: {e}"
-
-
-def main():
-    # 1. Create the output directory
-    if not os.path.exists(OUTPUT_DIR):
-        print(f"Creating directory: {OUTPUT_DIR}")
-        os.makedirs(OUTPUT_DIR)
-
-    # 2. Read the input CSV
-    print(f"Reading tickers from {INPUT_FILE}...")
-    try:
-        df = pd.read_csv(INPUT_FILE)
-        if "Symbol" not in df.columns:
-            print("Error: Column 'Symbol' not found in CSV.")
-            return
-        tickers = df["Symbol"].tolist()
-    except FileNotFoundError:
-        print(f"Error: {INPUT_FILE} not found.")
-        return
-
-    start_date, end_date = get_date_range()
-    total_tickers = len(tickers)
-
-    print(f"Found {total_tickers} tickers. Starting multithreaded download...")
-    print(f"Timeframe: {start_date} to {end_date}")
-    print(f"Max Workers: {MAX_WORKERS}")
-    print("-" * 50)
-
-    # 3. Multithreaded Execution
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        # Submit all tasks
-        future_to_ticker = {
-            executor.submit(process_ticker, ticker, start_date, end_date): ticker
-            for ticker in tickers
-        }
-
-        # Process results as they complete
-        completed_count = 0
-        for future in as_completed(future_to_ticker):
-            completed_count += 1
-            result = future.result()
-            print(f"[{completed_count}/{total_tickers}] {result}")
-
-    print("\nProcess complete.")
+        print(f"❌ Critical Error: {e}")
 
 
 if __name__ == "__main__":
-    main()
+    # Input Loop
+    while True:
+        user_input = input("\nEnter symbol (or 'q' to quit): ").strip().upper()
+        if user_input == "Q":
+            break
+        if user_input:
+            fetch_single_ticker(user_input)
