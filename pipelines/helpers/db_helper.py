@@ -412,3 +412,246 @@ def reset_company_state(symbol):
         symbol: Company stock symbol
     """
     update_company_state(symbol, current_page=0, is_processed=False, last_error=None)
+
+
+# ============================================================================
+# Content Scraper Helper Functions
+# ============================================================================
+
+def get_articles_for_scraping(batch_size=100, max_retries=3):
+    """
+    Fetch a batch of articles that need content scraping.
+    Prioritizes articles that haven't been scraped yet, then retries based on retry count.
+    Uses FOR UPDATE SKIP LOCKED to avoid contention between concurrent workers.
+    
+    Args:
+        batch_size: Number of articles to fetch per batch
+        max_retries: Maximum retry attempts for failed articles
+    
+    Returns:
+        List of article dicts with keys: id, title, url, source, company_id, published_at
+    """
+    conn = get_db_connection()
+    if not conn:
+        return []
+    
+    try:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        # Fetch articles without content, using row-level locking to prevent race conditions
+        # SKIP LOCKED ensures we don't wait if another worker is processing the row
+        query = """
+            SELECT id, title, url, source, company_id, published_at
+            FROM articles
+            WHERE content IS NULL 
+              AND content_scraped = FALSE
+              AND scraping_retry_count < %s
+              AND (last_scraped_at IS NULL OR last_scraped_at < NOW() - INTERVAL '1 hour')
+            ORDER BY last_scraped_at ASC NULLS FIRST, id ASC
+            LIMIT %s
+            FOR UPDATE SKIP LOCKED
+        """
+        
+        cursor.execute(query, (max_retries, batch_size))
+        articles = cursor.fetchall()
+        
+        # Commit immediately to release locks on rows we're not fetching
+        conn.commit()
+        return articles
+    except Exception as e:
+        print(f"Error fetching articles for scraping: {e}")
+        conn.rollback()
+        return []
+    finally:
+        if conn:
+            cursor.close()
+            conn.close()
+
+
+def update_articles_batch(updates_list):
+    """
+    Update multiple articles with scraped content and metadata.
+    Batches all updates into a single transaction for efficiency.
+    
+    Args:
+        updates_list: List of dicts with keys:
+                     - article_id: int
+                     - content: str
+                     - social_data: dict (will be converted to JSON)
+                     - media_outlet_id: int (optional)
+                     - success: bool (True if scraping succeeded)
+                     - error_msg: str (optional, only if success=False)
+    """
+    if not updates_list:
+        return
+    
+    conn = get_db_connection()
+    if not conn:
+        return
+    
+    try:
+        cursor = conn.cursor()
+        
+        for update in updates_list:
+            article_id = update['article_id']
+            success = update.get('success', True)
+            
+            if success:
+                # Update with scraped content
+                social_json = json.dumps(update.get('social_data', {}))
+                cursor.execute(
+                    """
+                    UPDATE articles
+                    SET content = %s,
+                        social_data = %s,
+                        media_outlet_id = %s,
+                        content_scraped = TRUE,
+                        last_scraped_at = NOW(),
+                        scraping_retry_count = 0,
+                        scraping_error = NULL
+                    WHERE id = %s
+                    """,
+                    (update.get('content', ''), social_json, update.get('media_outlet_id'), article_id)
+                )
+            else:
+                # Update with error information
+                error_msg = update.get('error_msg', 'Unknown error')[:500]
+                cursor.execute(
+                    """
+                    UPDATE articles
+                    SET last_scraped_at = NOW(),
+                        scraping_retry_count = scraping_retry_count + 1,
+                        scraping_error = %s
+                    WHERE id = %s
+                    """,
+                    (error_msg, article_id)
+                )
+        
+        conn.commit()
+    except Exception as e:
+        print(f"Error updating articles batch: {e}")
+        conn.rollback()
+    finally:
+        if conn:
+            cursor.close()
+            conn.close()
+
+
+def get_scraping_progress():
+    """
+    Fetch overall scraping progress metrics.
+    
+    Returns:
+        Dict with keys: total_articles, scraped_articles, pending_articles, failed_articles
+    """
+    conn = get_db_connection()
+    if not conn:
+        return {}
+    
+    try:
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN content_scraped = TRUE THEN 1 ELSE 0 END) as scraped,
+                SUM(CASE WHEN content_scraped = FALSE AND content IS NULL THEN 1 ELSE 0 END) as pending,
+                SUM(CASE WHEN scraping_retry_count > 0 AND content_scraped = FALSE THEN 1 ELSE 0 END) as failed
+            FROM articles
+        """)
+        
+        result = cursor.fetchone()
+        return {
+            'total_articles': result[0] or 0,
+            'scraped_articles': result[1] or 0,
+            'pending_articles': result[2] or 0,
+            'failed_articles': result[3] or 0
+        }
+    except Exception as e:
+        print(f"Error fetching scraping progress: {e}")
+        return {}
+    finally:
+        if conn:
+            cursor.close()
+            conn.close()
+
+
+def upsert_media_outlet(domain, name, social_handles_dict=None):
+    """
+    Upsert a media outlet into the database and return its ID.
+    Merges new social handles with existing ones.
+    
+    Args:
+        domain: Domain name (unique identifier)
+        name: Display name of the outlet
+        social_handles_dict: Dict of social handles (e.g., {'twitter': ['handle1'], 'instagram': ['handle2']})
+    
+    Returns:
+        ID of the inserted or existing media outlet
+    """
+    conn = get_db_connection()
+    if not conn:
+        return None
+    
+    try:
+        cursor = conn.cursor()
+        
+        # First, check if outlet exists and get current handles
+        cursor.execute(
+            "SELECT id, social_handles FROM media_outlets WHERE domain = %s",
+            (domain,)
+        )
+        existing = cursor.fetchone()
+        
+        if existing:
+            outlet_id = existing[0]
+            existing_handles = existing[1] if existing[1] else {}
+            
+            # Merge new handles with existing ones
+            if social_handles_dict:
+                merged_handles = dict(existing_handles)
+                for platform, handles in social_handles_dict.items():
+                    if platform in merged_handles:
+                        # Merge handles, avoiding duplicates
+                        existing_list = merged_handles[platform] if isinstance(merged_handles[platform], list) else [merged_handles[platform]]
+                        new_list = handles if isinstance(handles, list) else [handles]
+                        merged_handles[platform] = list(set(existing_list + new_list))
+                    else:
+                        merged_handles[platform] = handles if isinstance(handles, list) else [handles]
+                
+                # Update with merged handles
+                cursor.execute(
+                    "UPDATE media_outlets SET name = %s, social_handles = %s WHERE id = %s",
+                    (name, json.dumps(merged_handles), outlet_id)
+                )
+            else:
+                # Just update name if no new handles
+                cursor.execute(
+                    "UPDATE media_outlets SET name = %s WHERE id = %s",
+                    (name, outlet_id)
+                )
+        else:
+            # Insert new outlet
+            social_json = json.dumps(social_handles_dict) if social_handles_dict else '{}'
+            cursor.execute(
+                """
+                INSERT INTO media_outlets (domain, name, social_handles)
+                VALUES (%s, %s, %s)
+                RETURNING id
+                """,
+                (domain, name, social_json)
+            )
+            result = cursor.fetchone()
+            outlet_id = result[0] if result else None
+        
+        conn.commit()
+        return outlet_id
+    except Exception as e:
+        print(f"Error upserting media outlet {domain}: {e}")
+        conn.rollback()
+        return None
+    finally:
+        if conn:
+            cursor.close()
+            conn.close()
+
