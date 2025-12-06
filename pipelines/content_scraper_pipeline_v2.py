@@ -1,16 +1,3 @@
-"""
-High-performance multithreaded content scraper pipeline.
-
-Features:
-- 8 concurrent worker threads for maximum throughput
-- State-persistent processing (resumes from where it left off)
-- Batch-wise database pushing for efficient I/O
-- Row-level database locking to prevent race conditions
-- Automatic retry logic with exponential backoff
-- Real-time progress monitoring with Rich tables
-- Handles millions of articles efficiently
-"""
-
 import requests
 import time
 import os
@@ -579,35 +566,64 @@ def main():
     for i in range(1, NUM_WORKERS + 1):
         update_worker_state(i, status="Waiting to start...")
     
-    # Run workers with live progress display
-    with Live(generate_layout(), refresh_per_second=2) as live:
-        with ThreadPoolExecutor(max_workers=NUM_WORKERS, thread_name_prefix="Worker") as executor:
-            # Submit all worker tasks
-            futures = [executor.submit(worker_run, i) for i in range(1, NUM_WORKERS + 1)]
-            
-            # Monitor progress in real-time
-            try:
+    # Run workers
+    is_interactive = sys.stdout.isatty()
+    
+    if is_interactive:
+        console.print("[bold cyan]Running in interactive mode with Live dashboard.[/bold cyan]")
+    else:
+        # If running in background (nohup), disable fancy dashboard
+        console.print("[bold yellow]Running in background mode. Live dashboard disabled. Printing periodic updates.[/bold yellow]")
+
+    with ThreadPoolExecutor(max_workers=NUM_WORKERS, thread_name_prefix="Worker") as executor:
+        # Submit all worker tasks
+        futures = [executor.submit(worker_run, i) for i in range(1, NUM_WORKERS + 1)]
+        
+        try:
+            if is_interactive:
+                # Interactive Mode: Use Rich Live Dashboard
+                with Live(generate_layout(), refresh_per_second=2) as live:
+                    while True:
+                        live.update(generate_layout())
+                        
+                        if all(f.done() for f in futures):
+                            break
+                        
+                        time.sleep(0.5)
+            else:
+                # Background Mode: Periodic Text Logging
                 while True:
-                    live.update(generate_layout())
-                    
-                    # Check if all workers are done
                     if all(f.done() for f in futures):
                         break
                     
-                    time.sleep(0.5)
-                
-                # Wait for all futures and collect exceptions
-                for f in futures:
-                    try:
-                        f.result()
-                    except Exception as e:
-                        console.print(f"[bold red]Worker exception:[/bold red] {e}")
+                    # Log status every 30 seconds
+                    progress = get_scraping_progress()
+                    
+                    status_msg = (
+                        f"STATUS: Processed: {global_metrics['total_articles_processed']:,} | "
+                        f"Success: {global_metrics['successful_scrapes']:,} | "
+                        f"Failed: {global_metrics['failed_scrapes']:,} | "
+                        f"Rate Limited: {global_metrics['rate_limited_articles']:,} | "
+                        f"DB Pending: {len(global_metrics['pending_push'])} | "
+                        f"Remaining: {progress.get('pending_articles', 0):,}"
+                    )
+                    console.print(status_msg)
+                    
+                    # Also log exceptions if any worker died early (though we catch them in worker_run)
+                    time.sleep(10)
             
-            except KeyboardInterrupt:
-                console.print("\n[bold yellow]Keyboard interrupt detected. Shutting down gracefully...[/bold yellow]")
-                executor.shutdown(wait=True)
-                console.print("[bold green]Shutdown complete.[/bold green]")
-                return
+            # Wait for all futures and collect exceptions
+            for f in futures:
+                try:
+                    f.result()
+                except Exception as e:
+                    console.print(f"[bold red]Worker exception:[/bold red] {e}")
+        
+        except KeyboardInterrupt:
+            console.print("\n[bold yellow]Keyboard interrupt detected. Shutting down gracefully...[/bold yellow]")
+            executor.shutdown(wait=True)
+            console.print("[bold green]Shutdown complete.[/bold green]")
+            return
     
     # Final statistics
     console.print("\n[bold green]All workers finished.[/bold green]")
