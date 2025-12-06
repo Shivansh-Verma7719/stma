@@ -34,15 +34,6 @@ from rich import box
 
 load_dotenv()
 
-# ============================================================================
-# Configuration - HPC Optimized
-# ============================================================================
-
-# CONFIGURABLE: Adjust these based on your VM capacity
-# For 50 threads + 10-12 cores + 3-4GB RAM, recommended:
-# NUM_WORKERS = 32-40 (threads are lightweight, I/O bound)
-# BATCH_SIZE = 30-40 (smaller batches to avoid memory bloat)
-# PUSH_BATCH_SIZE = 80-100 (balance between DB writes and memory)
 NUM_WORKERS = int(os.getenv('NUM_WORKERS', 10))  # Configurable via env var, default 16
 BATCH_SIZE = int(os.getenv('BATCH_SIZE', 30))  # Smaller batches for memory efficiency
 PUSH_BATCH_SIZE = int(os.getenv('PUSH_BATCH_SIZE', 80))  # Async push threshold
@@ -70,9 +61,23 @@ logging.basicConfig(
     format="%(asctime)s - Worker %(threadName)s - %(levelname)s - %(message)s",
 )
 
-# ============================================================================
-# Global State Management
-# ============================================================================
+# Detailed Error Logger
+detailed_error_log_path = f"logs/content_scraper_errors_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+detailed_logger = logging.getLogger("detailed_errors")
+detailed_logger.setLevel(logging.ERROR)
+detailed_logger.propagate = False  # Don't propagate to root logger
+
+# Create file handler for detailed errors
+fh = logging.FileHandler(detailed_error_log_path)
+fh.setLevel(logging.ERROR)
+formatter = logging.Formatter('%(asctime)s | %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+fh.setFormatter(formatter)
+detailed_logger.addHandler(fh)
+
+def log_detailed_error(url: str, article_id: str, error_type: str, error_msg: str, error_code: str = "N/A"):
+    """Log distinct error details to the dedicated error log file."""
+    msg = f"[{error_type}] [{error_code}] URL: {url} | ID: {article_id} | Msg: {error_msg}"
+    detailed_logger.error(msg)
 
 # Worker status tracking: worker_id -> dict
 worker_states: Dict[int, Dict] = {}
@@ -287,6 +292,9 @@ def process_article_batch(articles_batch: List[Dict], worker_id: int) -> List[Di
                     error_type = scrape_result.get('error_type', 'Unknown Error')
                     error_msg = scrape_result.get('error', '')[:200]
                     
+                    # Log detailed error
+                    log_detailed_error(url, article_id, error_type, error_msg, error_code)
+                    
                     updates.append({
                         'article_id': article_id,
                         'success': False,
@@ -309,6 +317,7 @@ def process_article_batch(articles_batch: List[Dict], worker_id: int) -> List[Di
                             media_outlet_id = upsert_media_outlet(domain, source, social_handles)
                         except Exception as e:
                             logging.error(f"Error upserting media outlet {domain}: {e}")
+                            log_detailed_error(url, article_id, "DB_ERROR", f"Outlet Upsert: {e}")
                     
                     # Only mark as successful if we got actual content, not just handles
                     if content and content.strip():
@@ -325,20 +334,26 @@ def process_article_batch(articles_batch: List[Dict], worker_id: int) -> List[Di
                     else:
                         # No content retrieved, mark as failed even if we got handles
                         # Note: Media outlet handles were still saved above
+                        msg = "Empty content - article may be paywalled or format not supported"
+                        log_detailed_error(url, article_id, "NO_CONTENT", msg)
+                        
                         updates.append({
                             'article_id': article_id,
                             'success': False,
-                            'error_msg': '[NO_CONTENT] Empty content - article may be paywalled or format not supported'
+                            'error_msg': f'[NO_CONTENT] {msg}'
                         })
                         
                         with global_metrics_lock:
                             global_metrics['failed_scrapes'] += 1
             else:
                 # scrape_result is None - unexpected failure
+                msg = "Failed to download article - unexpected error"
+                log_detailed_error(url, article_id, "UNKNOWN", msg)
+                
                 updates.append({
                     'article_id': article_id,
                     'success': False,
-                    'error_msg': '[UNKNOWN] Failed to download article - unexpected error'
+                    'error_msg': f'[UNKNOWN] {msg}'
                 })
                 
                 with global_metrics_lock:
@@ -347,6 +362,7 @@ def process_article_batch(articles_batch: List[Dict], worker_id: int) -> List[Di
         except Exception as e:
             error_msg = str(e)[:200]
             logging.error(f"Worker {worker_id} error processing article {article_id}: {e}")
+            log_detailed_error(url, article_id, "EXCEPTION", error_msg)
             recent_errors.append(f"[W{worker_id}] Article {article_id}: {error_msg}")
             
             updates.append({
