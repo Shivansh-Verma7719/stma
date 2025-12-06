@@ -7,6 +7,9 @@ import sys
 from io import StringIO
 from typing import List, Dict, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import urllib3.exceptions
+import http.client
+import requests.exceptions
 
 import mediacloud.api
 from dotenv import load_dotenv
@@ -110,39 +113,58 @@ def query_media_cloud(
     more_stories = True
     page_num = start_page
 
-    try:
-        while more_stories:
-            update_worker_state(worker_id, status=f"Fetching page {page_num}...")
-            
-            page, pagination_token = search_api.story_list(
-                query,
-                start_date=START_DATE,
-                end_date=END_DATE,
-                collection_ids=[US_NATIONAL_COLLECTION],
-                pagination_token=pagination_token,
-            )
+    while more_stories:
+        update_worker_state(worker_id, status=f"Fetching page {page_num}...")
+        
+        # Retry loop for network errors
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                page, pagination_token = search_api.story_list(
+                    query,
+                    start_date=START_DATE,
+                    end_date=END_DATE,
+                    collection_ids=[US_NATIONAL_COLLECTION],
+                    pagination_token=pagination_token,
+                )
+                break # Success, exit retry loop
+            except (
+                urllib3.exceptions.ReadTimeoutError,
+                http.client.RemoteDisconnected,
+                urllib3.exceptions.NameResolutionError,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.ReadTimeout,
+                urllib3.exceptions.MaxRetryError
+            ) as e:
+                if attempt < max_retries - 1:
+                    sleep_time = 5 * (2 ** attempt) # 5, 10, 20
+                    update_worker_state(worker_id, status=f"Network error (retry {attempt+1}/{max_retries}): {str(e)[:50]}...")
+                    logging.warning(f"Worker {worker_id} network error on '{query}' (attempt {attempt+1}): {e}")
+                    time.sleep(sleep_time)
+                else:
+                    # Retries exhausted, re-raise to be caught by worker_run
+                    logging.error(f"Worker {worker_id} failed to query '{query}' after {max_retries} attempts: {e}")
+                    raise e
+            except Exception as e:
+                # Other errors: log and re-raise immediately
+                logging.error(f"Worker {worker_id} unexpected error on '{query}': {e}", exc_info=True)
+                raise e
 
-            # Yield the current page of articles
-            yield page
-            
-            update_worker_state(
-                worker_id, 
-                status=f"Page {page_num} done ({len(page)} articles)",
-                articles_found=worker_states[worker_id]["articles_found"] + len(page)
-            )
-            
-            more_stories = pagination_token is not None
-            page_num += 1
+        # Yield the current page of articles
+        yield page
+        
+        update_worker_state(
+            worker_id, 
+            status=f"Page {page_num} done ({len(page)} articles)",
+            articles_found=worker_states[worker_id]["articles_found"] + len(page)
+        )
+        
+        more_stories = pagination_token is not None
+        page_num += 1
 
-            # Per-key rate limit ~2 req/min: 30s between calls
-            if more_stories:
-                countdown_sleep(worker_id, 30)
-
-    except Exception as e:
-        current_errors = worker_states[worker_id].get("errors", 0)
-        update_worker_state(worker_id, status=f"Error: {str(e)[:50]}...", errors=current_errors + 1)
-        logging.error(f"Worker {worker_id} failed to query '{query}': {e}", exc_info=True)
-        recent_errors.append(f"[Worker {worker_id}] {str(e)[:100]}...")
+        # Per-key rate limit ~2 req/min: 30s between calls
+        if more_stories:
+            countdown_sleep(worker_id, 30)
 
 
 def process_company(

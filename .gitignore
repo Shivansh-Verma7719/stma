@@ -14,3 +14,7 @@ cdk.out
 env
 venv
 .env.example
+
+# Logs
+*.log
+logs/
