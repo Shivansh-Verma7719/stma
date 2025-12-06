@@ -8,3 +8,4 @@ newspaper3k
 beautifulsoup4
 rich
 lxml_html_clean
+yfinance
