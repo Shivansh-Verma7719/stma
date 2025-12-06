@@ -43,7 +43,7 @@ load_dotenv()
 # NUM_WORKERS = 32-40 (threads are lightweight, I/O bound)
 # BATCH_SIZE = 30-40 (smaller batches to avoid memory bloat)
 # PUSH_BATCH_SIZE = 80-100 (balance between DB writes and memory)
-NUM_WORKERS = int(os.getenv('NUM_WORKERS', 4))  # Configurable via env var, default 16
+NUM_WORKERS = int(os.getenv('NUM_WORKERS', 10))  # Configurable via env var, default 16
 BATCH_SIZE = int(os.getenv('BATCH_SIZE', 30))  # Smaller batches for memory efficiency
 PUSH_BATCH_SIZE = int(os.getenv('PUSH_BATCH_SIZE', 80))  # Async push threshold
 REQUEST_TIMEOUT = int(os.getenv('REQUEST_TIMEOUT', 20))  # Timeout per article
