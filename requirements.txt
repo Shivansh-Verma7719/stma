@@ -9,4 +9,6 @@ beautifulsoup4
 transformers
 matplotlib
 seaborn
+aws-cdk-lib
 constructs
+tqdm

@@ -591,26 +591,46 @@ def main():
                         
                         time.sleep(0.5)
             else:
-                # Background Mode: Periodic Text Logging
-                while True:
-                    if all(f.done() for f in futures):
-                        break
+                # Background Mode: TQDM Progress Bar
+                from tqdm import tqdm
+                
+                # Initial progress fetch
+                progress = get_scraping_progress()
+                initial_processed = global_metrics['total_articles_processed']
+                # Total estimate: pending + already processed in this session (which starts at 0) 
+                # Ideally we want total articles to do.
+                total_estimate = progress.get('total_articles', 0)
+                initial_scraped_db = progress.get('scraped_articles', 0)
+                
+                with tqdm(total=total_estimate, initial=initial_scraped_db, unit="docs", 
+                          desc="Scraping Progress", mininterval=5.0, file=sys.stdout, 
+                          dynamic_ncols=True) as pbar:
                     
-                    # Log status every 30 seconds
-                    progress = get_scraping_progress()
+                    last_scraped_total = initial_scraped_db
                     
-                    status_msg = (
-                        f"STATUS: Processed: {global_metrics['total_articles_processed']:,} | "
-                        f"Success: {global_metrics['successful_scrapes']:,} | "
-                        f"Failed: {global_metrics['failed_scrapes']:,} | "
-                        f"Rate Limited: {global_metrics['rate_limited_articles']:,} | "
-                        f"DB Pending: {len(global_metrics['pending_push'])} | "
-                        f"Remaining: {progress.get('pending_articles', 0):,}"
-                    )
-                    console.print(status_msg)
-                    
-                    # Also log exceptions if any worker died early (though we catch them in worker_run)
-                    time.sleep(10)
+                    while True:
+                        if all(f.done() for f in futures):
+                            break
+                        
+                        current_progress = get_scraping_progress()
+                        current_scraped_total = current_progress.get('scraped_articles', 0)
+                        current_failed = current_progress.get('failed_articles', 0)
+                        
+                        delta = current_scraped_total - last_scraped_total
+                        if delta > 0:
+                            pbar.update(delta)
+                            last_scraped_total = current_scraped_total
+                        
+                        # Update postfix with session stats
+                        pbar.set_postfix({
+                            'Session': f"{global_metrics['total_articles_processed']:,}",
+                            'Success': f"{global_metrics['successful_scrapes']:,}",
+                            'Fail': f"{global_metrics['failed_scrapes']:,}",
+                            'RateLimit': f"{global_metrics['rate_limited_articles']:,}",
+                            'Q': len(global_metrics['pending_push'])
+                        })
+                        
+                        time.sleep(5)
             
             # Wait for all futures and collect exceptions
             for f in futures:
