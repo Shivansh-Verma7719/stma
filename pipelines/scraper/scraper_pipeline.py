@@ -11,9 +11,18 @@ from urllib.parse import urlparse
 from collections import deque
 from typing import List, Dict, Optional
 import queue
+import sys
+from pathlib import Path
+
+# Add parent directory (pipelines) to sys.path to resolve 'helpers' module
+current_dir = Path(__file__).resolve().parent
+parent_dir = current_dir.parent
+sys.path.append(str(parent_dir))
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Semaphore, Lock
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from newspaper import Article
 from bs4 import BeautifulSoup
@@ -35,9 +44,9 @@ from rich import box
 
 load_dotenv()
 
-NUM_WORKERS = int(os.getenv('NUM_WORKERS', 5))  # Configurable via env var, default 16
+NUM_WORKERS = int(os.getenv('NUM_WORKERS', 20))  # Increased default for higher throughput
 BATCH_SIZE = int(os.getenv('BATCH_SIZE', 30))  # Local batch size for processing/pushing
-PRODUCER_BATCH_SIZE = 500  # Large batch size for DB fetching
+PRODUCER_BATCH_SIZE = NUM_WORKERS * BATCH_SIZE  # Large batch size for DB fetching
 PUSH_BATCH_SIZE = int(os.getenv('PUSH_BATCH_SIZE', 80))  # Async push threshold
 REQUEST_TIMEOUT = int(os.getenv('REQUEST_TIMEOUT', 20))  # Timeout per article
 MAX_RETRIES = int(os.getenv('MAX_RETRIES', 3))  # Max retry attempts
@@ -47,12 +56,36 @@ RATE_LIMIT_DELAY = 30  # Seconds to wait after 429 error before retry
 RATE_LIMIT_BACKOFF_MULTIPLIER = 2  # How much to increase delay on repeated 429s
 
 # User agents for rotating to avoid 403 blocks
+# Configure robust session
+def create_session():
+    session = requests.Session()
+    # Retry strategy: robust handling of temporary failures
+    retry_strategy = Retry(
+        total=3,
+        backoff_factor=1,  # wait 1s, 2s, 4s...
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["HEAD", "GET", "OPTIONS"]
+    )
+    # Connection pooling: size matches worker count to avoid blocking
+    adapter = HTTPAdapter(
+        max_retries=retry_strategy,
+        pool_connections=NUM_WORKERS + 5, # slight buffer
+        pool_maxsize=NUM_WORKERS + 5
+    )
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+# Global session for connection pooling efficiency
+SCRAPER_SESSION = create_session()
+
+# Fallback User Agents if fake_useragent fails or for rotation
 USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:122.0) Gecko/20100101 Firefox/122.0',
 ]
 
 # Configure logging
@@ -145,35 +178,79 @@ def extract_social_handles(html_content: str) -> Dict:
     return handles
 
 
-def get_random_user_agent() -> str:
-    """Get a random user agent to avoid detection."""
-    import random
-    return random.choice(USER_AGENTS)
+def get_random_header() -> Dict:
+    """Generate realistic browser headers."""
+    user_agent = None
+    try:
+        from fake_useragent import UserAgent
+        ua = UserAgent()
+        user_agent = ua.random
+    except ImportError:
+        pass
+    except Exception:
+        pass
+        
+    if not user_agent:
+        import random
+        user_agent = random.choice(USER_AGENTS)
+        
+    return {
+        'User-Agent': user_agent,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
+        'Cache-Control': 'max-age=0',
+    }
 
 
 def scrape_article_content(url: str, timeout: int = REQUEST_TIMEOUT) -> Optional[Dict]:
     """
-    Scrape article content from URL.
+    Scrape article content from URL using robust session.
     
     Returns:
         Dict with keys: content, html, social_handles, error_code (if failed)
         Or None if scraping failed
     """
     try:
-        # Rotate user agents to bypass 403 blocks
-        config = {
-            'browser_user_agent': get_random_user_agent(),
-            'request_timeout': timeout,
-            'number_threads': 1,
-            'fetch_images': False,
-            'memoize_articles': False,
-        }
+        # Use our robust session with retries and pooling
+        headers = get_random_header()
         
-        article = Article(url, keep_article_html=True, **config)
-        article.download()
+        # Download content manually for better control
+        response = SCRAPER_SESSION.get(url, headers=headers, timeout=timeout, allow_redirects=True)
+        
+        # Raise error for bad status codes
+        response.raise_for_status()
+        
+        # Robust decoding to prevent XML parsing errors
+        # Use response.content with error replacement to handle binary/null bytes
+        encoding = response.encoding or 'utf-8'
+        try:
+             html_content = response.content.decode(encoding, errors='replace')
+        except:
+             html_content = response.content.decode('utf-8', errors='replace')
+
+        # Remove null bytes which break lxml
+        html_content = html_content.replace('\x00', '')
+
+        # Parse content using newspaper3k
+        article = Article(url)
+        article.download_state = 2 # SUCCESS (ensure state is set)
+        article.set_html(html_content)
         article.parse()
         
         content = article.text
+        # If newspaper fails to extract text, try fallback or just return empty
+        if not content or len(content.strip()) < 50:
+             # Fallback: simple soup extraction?
+             # For now, just trust newspaper but maybe clean it
+             pass
+
         html = article.html
         social_handles = extract_social_handles(html)
         
@@ -188,9 +265,14 @@ def scrape_article_content(url: str, timeout: int = REQUEST_TIMEOUT) -> Optional
         
         # Extract HTTP status code if present
         error_code = None
-        status_match = re.search(r'\b(\d{3})\b', error_str)
-        if status_match:
-            error_code = status_match.group(1)
+        # Check for response object attached to exception
+        if hasattr(e, 'response') and e.response is not None:
+             error_code = str(e.response.status_code)
+             
+        if not error_code:
+            status_match = re.search(r'\b(\d{3})\b', error_str)
+            if status_match:
+                error_code = status_match.group(1)
         
         # Check for specific error types
         if '429' in error_str or 'too many requests' in error_str_lower:

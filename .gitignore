@@ -18,3 +18,5 @@ venv
 # Logs
 *.log
 logs/
+
+data/backups/

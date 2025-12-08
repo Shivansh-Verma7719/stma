@@ -12,3 +12,5 @@ seaborn
 aws-cdk-lib
 constructs
 tqdm
+torch
+accelerate
