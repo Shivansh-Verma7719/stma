@@ -1,12 +1,23 @@
 import pandas as pd
 import numpy as np
+import os
+import glob
 
 
 def run_statistical_anomaly(input_file, output_file):
-    print("--- Running Method 2: Statistical Anomaly (Z-Score & IQR) ---")
-
     # 1. Load Data
     df = pd.read_csv(input_file)
+
+    # Check if necessary columns exist
+    required_cols = ["intc", "v", "flag", "time", "stock_name"]
+    if not all(col in df.columns for col in required_cols):
+        print(f"Skipping {os.path.basename(input_file)}: Missing required columns.")
+        return
+
+    # Check for sufficient data
+    if len(df) < 10:
+        print(f"Skipping {os.path.basename(input_file)}: Not enough data points.")
+        return
 
     # 2. Pre-calculation
     # Log Returns for Price
@@ -17,7 +28,11 @@ def run_statistical_anomaly(input_file, output_file):
     mean_ret = df["log_returns"].mean()
     std_ret = df["log_returns"].std()
 
-    df["z_score_price"] = (df["log_returns"] - mean_ret) / std_ret
+    # Avoid division by zero if std is 0
+    if std_ret == 0:
+        df["z_score_price"] = 0
+    else:
+        df["z_score_price"] = (df["log_returns"] - mean_ret) / std_ret
 
     # 4. Volume Anomaly: IQR (Interquartile Range)
     # Volume is often non-normal (fat-tailed), so Z-score is bad. IQR is better.
@@ -58,14 +73,45 @@ def run_statistical_anomaly(input_file, output_file):
 
     final_df.to_csv(output_file, index=False)
 
-    print(
-        f"Total 'Silent Anomalies' (Shocks with No News): {final_df['silent_anomaly'].sum()}"
-    )
-    print(f"Top 3 Price Shocks:\n{final_df[['time', 'z_score_price', 'flag']].head(3)}")
-    print(f"Saved to {output_file}")
+    # Optional: Print stats for this specific file
+    # count = final_df['silent_anomaly'].sum()
+    # print(f"  > Silent Anomalies found: {count}")
 
 
 if __name__ == "__main__":
-    run_statistical_anomaly(
-        "processed_anomaly_data.csv", "result_method2_statistical.csv"
-    )
+    # CONFIGURATION
+    INPUT_DIR = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/fin_process/"
+    OUTPUT_DIR = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/statistical"
+
+    # Check input directory
+    if not os.path.exists(INPUT_DIR):
+        print(f"Error: Input directory {INPUT_DIR} not found.")
+    else:
+        # Create output directory
+        if not os.path.exists(OUTPUT_DIR):
+            os.makedirs(OUTPUT_DIR)
+            print(f"Created output directory: {OUTPUT_DIR}")
+
+        # Find all processed CSV files
+        csv_files = glob.glob(os.path.join(INPUT_DIR, "*.csv"))
+
+        if not csv_files:
+            print(f"No CSV files found in {INPUT_DIR}")
+        else:
+            print(f"Found {len(csv_files)} files to process.")
+
+            for file_path in csv_files:
+                try:
+                    filename = os.path.basename(file_path)
+                    # Name the result file clearly
+                    output_name = f"{filename}"
+                    output_path = os.path.join(OUTPUT_DIR, output_name)
+
+                    print(f"Processing {filename}...", end=" ")
+                    run_statistical_anomaly(file_path, output_path)
+                    print("Done.")
+
+                except Exception as e:
+                    print(f"\nError processing {filename}: {e}")
+
+            print("--- Statistical Anomaly Analysis Complete ---")
