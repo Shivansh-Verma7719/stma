@@ -1,9 +1,10 @@
 import pandas as pd
 import numpy as np
 import os
+import glob
 
 # Import your custom indicator modules
-# Ensure these .py files are in the same directory
+# Ensure these .py files are in the 'indicators' directory relative to this script
 import indicators.obv as obv
 import indicators.impulsemacd as impulsemacd
 import indicators.squeeze as squeeze
@@ -42,7 +43,11 @@ def load_and_prep_data(filepath):
 
     # Ensure 'time' column exists for ImpulseMACD (using index if necessary)
     if "time" not in df.columns:
-        df["time"] = df.index
+        # Check if Date exists, otherwise use index
+        if "date" in df.columns:
+            df.rename(columns={"date": "time"}, inplace=True)
+        else:
+            df["time"] = df.index
 
     return df
 
@@ -51,17 +56,15 @@ def add_indicators(df):
     """
     Runs the specific custom indicators selected for the Media Bias study.
     """
-    print("--- Calculating Indicators ---")
-
     # 1. SuperTrend (Context Filter)
     # Uses period=10, multiplier=3 (Standard)
-    print("Adding SuperTrend...")
+    # print("Adding SuperTrend...")
     df = supertrend.SuperTrend(df, period=10, multiplier=3)
     # SuperTrend returns a cleaned DF, so we update 'df'
 
     # 2. Impulse MACD (Fast Reaction)
     # Uses lengthMA=34, lengthSignal=9 (Common for Impulse)
-    print("Adding Impulse MACD...")
+    # print("Adding Impulse MACD...")
     # Note: impulsemacd returns a separate DF, we must merge it back
     macd_df = impulsemacd.macd(df, lengthMA=34, lengthSignal=9)
     # Merge on 'time' or index to ensure alignment
@@ -84,19 +87,19 @@ def add_indicators(df):
 
     # 3. Squeeze (Volatility/Indifference)
     # Uses conv=2.0 (Keltner factor), length=20
-    print("Adding TTM Squeeze...")
+    # print("Adding TTM Squeeze...")
     df = squeeze.squeeze_index2(df, conv=2.0, length=20, col="intc")
     # Adds column 'psi' to df
 
     # 4. Velocity (Shock Detector)
     # Lookback=20, EMA Length=10
-    print("Adding Velocity...")
+    # print("Adding Velocity...")
     df = velocity_indicator.calculate(df, lookback=20, ema_length=10)
     # Adds 'velocity' and 'smooth_velocity'
 
     # 5. OBV Custom (Smart Money)
     # Params: window_len=20, v_len=20, len10=10 (for EMA), slow_length=26
-    print("Adding Custom OBV...")
+    # print("Adding Custom OBV...")
     df = obv.calculate_custom_indicators(
         df, window_len=20, v_len=20, len10=10, slow_length=26
     )
@@ -141,23 +144,49 @@ def clean_and_save(df, output_path):
 
     # Save
     final_df.to_csv(output_path, index=False)
-    print(f"--- Success! Processed data saved to {output_path} ---")
-    print(f"Final Data Shape: {final_df.shape}")
+    # print(f"Saved: {output_path}")
 
 
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
     # CONFIGURATION
-    INPUT_FILE = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/fin_data/A.csv"  # <--- REPLACE THIS with your actual file name
-    OUTPUT_FILE = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/fin_process/processed_anomaly_data.csv"
+    INPUT_DIR = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/fin_data/"
+    OUTPUT_DIR = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/fin_process/"
 
-    # Check if input file exists
-    if not os.path.exists(INPUT_FILE):
-        print(
-            f"Error: {INPUT_FILE} not found. Please ensure your data file is in the folder."
-        )
+    # Check if input directory exists
+    if not os.path.exists(INPUT_DIR):
+        print(f"Error: Input directory {INPUT_DIR} not found.")
     else:
-        # RUN PIPELINE
-        raw_df = load_and_prep_data(INPUT_FILE)
-        enriched_df = add_indicators(raw_df)
-        clean_and_save(enriched_df, OUTPUT_FILE)
+        # Create output directory if it doesn't exist
+        if not os.path.exists(OUTPUT_DIR):
+            os.makedirs(OUTPUT_DIR)
+            print(f"Created output directory: {OUTPUT_DIR}")
+
+        # Find all CSV files in the input directory
+        csv_files = glob.glob(os.path.join(INPUT_DIR, "*.csv"))
+
+        if not csv_files:
+            print(f"No CSV files found in {INPUT_DIR}")
+        else:
+            print(f"Found {len(csv_files)} files to process.")
+
+            for file_path in csv_files:
+                try:
+                    # Get filename to create output name
+                    filename = os.path.basename(file_path)
+                    output_name = f"{filename}"
+                    output_path = os.path.join(OUTPUT_DIR, output_name)
+
+                    print(f"Processing {filename}...", end=" ")
+
+                    # RUN PIPELINE
+                    raw_df = load_and_prep_data(file_path)
+                    enriched_df = add_indicators(raw_df)
+                    clean_and_save(enriched_df, output_path)
+
+                    print("Done.")
+
+                except Exception as e:
+                    print(f"\nError processing {filename}: {e}")
+
+            print("--- Batch Processing Complete ---")

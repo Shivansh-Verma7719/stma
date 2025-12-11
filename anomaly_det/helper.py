@@ -54,7 +54,7 @@ def add_synthetic_flags(input_file, output_file):
 
 if __name__ == "__main__":
     # Settings
-    RAW_FILE = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/fin_data/A.csv"  # Your input file
-    READY_FILE = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/fin_process/A_prepared.csv"  # The file to feed into feature_engineering.py
+    RAW_FILE = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/fin_data/AAPL.csv"  # Your input file
+    READY_FILE = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/fin_process/AAPL.csv"  # The file to feed into feature_engineering.py
 
     add_synthetic_flags(RAW_FILE, READY_FILE)
