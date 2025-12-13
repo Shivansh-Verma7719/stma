@@ -1,62 +1,74 @@
+import os
 import pandas as pd
-import numpy as np
+import psycopg2
+from dotenv import load_dotenv
+
+# Load environment variables (Same as your previous config)
+load_dotenv()
+
+# Configuration
+OUTPUT_DIRECTORY = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/fetch"  # The directory where you want the files
+TABLE_NAME = "final"
 
 
-def add_synthetic_bias_index(input_file, output_file):
-    # 1. Load the raw data
-    df = pd.read_csv(input_file)
-    print(f"Loaded {len(df)} rows from {input_file}")
+def export_tickers_to_csv():
+    # 1. Create the output directory if it doesn't exist
+    if not os.path.exists(OUTPUT_DIRECTORY):
+        os.makedirs(OUTPUT_DIRECTORY)
+        print(f"Created directory: {OUTPUT_DIRECTORY}")
 
-    # 2. Rename 'Date' to 'time'
-    if "Date" in df.columns:
-        df.rename(columns={"Date": "time"}, inplace=True)
-    elif "date" in df.columns:
-        df.rename(columns={"date": "time"}, inplace=True)
-
-    # 3. Add Placeholder Stock Name
-    # (Extracts from filename if possible, else defaults)
-    stock_name = input_file.split("/")[-1].replace(".csv", "")
-    df["stock_name"] = stock_name
-
-    # 4. Generate Synthetic 'bias_index' (-1 to 1)
-    np.random.seed(42)  # For reproducibility
-
-    # Step A: Generate random noise (-1 to 1)
-    # We use a normal distribution centered at 0 to mimic neutral bias being most common
-    raw_noise = np.random.normal(loc=0, scale=0.5, size=len(df))
-
-    # Step B: Create a "Trend" using a Moving Average
-    # Media sentiment doesn't jump from -1 to +1 daily; it trends.
-    # We smooth the noise over a 14-day window (2 weeks)
-    smooth_bias = pd.Series(raw_noise).rolling(window=14, min_periods=1).mean()
-
-    # Step C: Clip to ensure it stays strictly within -1 and 1
-    df["bias_index"] = smooth_bias.clip(lower=-1.0, upper=1.0)
-
-    # Optional: Introduce occasional "Viral Spikes" (Random days with extreme values)
-    # This simulates a breaking news event that breaks the trend
-    spike_indices = np.random.choice(df.index, size=int(len(df) * 0.05), replace=False)
-    df.loc[spike_indices, "bias_index"] = np.random.uniform(
-        -1, 1, size=len(spike_indices)
+    # 2. Connect to DB
+    print("Connecting to database...")
+    conn = psycopg2.connect(
+        host=os.getenv("DB_HOST", "localhost"),
+        database=os.getenv("DB_NAME"),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD"),
+        port=os.getenv("DB_PORT", "5432"),
     )
 
-    # 5. Reorder columns
-    # Expected: time, stock_name, bias_index, open, high, low, close, volume
-    cols_order = ["time", "stock_name", "bias_index"]
-    remaining_cols = [c for c in df.columns if c not in cols_order]
+    try:
+        # 3. Fetch the data
+        # We use pandas read_sql to pull everything into a DataFrame at once.
+        # This is usually faster than 250 separate queries.
+        print(f"Fetching data from table '{TABLE_NAME}'...")
 
-    df = df[cols_order + remaining_cols]
+        # We wrap "final" in quotes because it can sometimes be a reserved keyword
+        query = f'SELECT * FROM "{TABLE_NAME}"'
 
-    # 6. Save
-    df.to_csv(output_file, index=False)
-    print(f"Success! Saved prepared data with bias_index to: {output_file}")
-    print(df[["time", "bias_index"]].head())
+        df = pd.read_sql(query, conn)
+
+        if df.empty:
+            print("Table is empty.")
+            return
+
+        print(f"Fetched {len(df)} rows. Splitting by ticker...")
+
+        # 4. Group by Ticker and Save
+        # This assumes your column name in the DB is literally 'ticker'
+        # if it is 'symbol' or 'instrument', change 'ticker' below to that name.
+        unique_tickers = df["ticker"].unique()
+        print(f"Found {len(unique_tickers)} unique tickers.")
+
+        for ticker in unique_tickers:
+            # Filter data for this specific ticker
+            ticker_df = df[df["ticker"] == ticker]
+
+            # Sanitize ticker for filename (e.g. remove / or \ to prevent path errors)
+            safe_filename = str(ticker).replace("/", "_").replace("\\", "_")
+            file_path = os.path.join(OUTPUT_DIRECTORY, f"{safe_filename}.csv")
+
+            # Write to CSV
+            # index=False prevents pandas from adding a 0,1,2... row number column
+            ticker_df.to_csv(file_path, index=False)
+
+    except Exception as e:
+        print(f"Error: {e}")
+
+    finally:
+        conn.close()
+        print("Done.")
 
 
 if __name__ == "__main__":
-    # Settings
-    # Update these paths to match your local setup
-    RAW_FILE = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/fetch/A.csv"
-    READY_FILE = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/fin_data/A.csv"
-
-    add_synthetic_bias_index(RAW_FILE, READY_FILE)
+    export_tickers_to_csv()
