@@ -14,7 +14,7 @@ sns.set_theme(style="whitegrid")
 # --- GLOBAL CONFIG ---
 # Define paths based on your directory structure
 BASE_DIR = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/"
-MAX_WORKERS = 30  # Number of threads for file reading
+MAX_WORKERS = 50  # Number of threads for file reading
 
 
 def process_single_stock_merge(f1):
