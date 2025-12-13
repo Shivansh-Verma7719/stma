@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 import os
 import glob
+import concurrent.futures
+import time
 
 # Import your custom indicator modules
 import indicators.obv as obv
@@ -9,6 +11,11 @@ import indicators.impulsemacd as impulsemacd
 import indicators.squeeze as squeeze
 import indicators.velocity_indicator as velocity_indicator
 import indicators.supertrend as supertrend
+
+# --- CONFIGURATION ---
+INPUT_DIR = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/fin_data/"
+OUTPUT_DIR = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/fin_process/"
+MAX_WORKERS = 12  # Number of threads
 
 
 def load_and_prep_data(filepath):
@@ -86,9 +93,6 @@ def add_indicators(df):
     )
 
     # 6. RELATIVE VOLUME (The 10-Year Fix)
-    # We divide today's volume by the 50-day moving average.
-    # Result: 1.0 = Normal, 3.0 = 3x Normal Volume.
-    # This works regardless of whether the stock traded 1M shares in 2015 or 100M in 2025.
     df["vol_ma_50"] = df["v"].rolling(window=50).mean()
     df["rel_vol"] = df["v"] / df["vol_ma_50"]
 
@@ -113,13 +117,13 @@ def clean_and_save(df, output_path):
         "intc",
         "v",
         # Generated Features
-        "STX",  # SuperTrend
-        "ImpulseHisto",  # Momentum
-        "psi",  # Squeeze
-        "smooth_velocity",  # Price Speed (%)
-        "macd",  # OBV Flow
-        "b5",  # OBV Breakout
-        "rel_vol",  # Relative Volume (Normalized)
+        "STX",
+        "ImpulseHisto",
+        "psi",
+        "smooth_velocity",
+        "macd",
+        "b5",
+        "rel_vol",
     ]
 
     # Filter columns if they exist
@@ -130,11 +134,30 @@ def clean_and_save(df, output_path):
     final_df.to_csv(output_path, index=False)
 
 
+def process_single_file(file_path):
+    """
+    Worker function to process a single CSV file.
+    Returns the filename if successful, or None if failed.
+    """
+    try:
+        filename = os.path.basename(file_path)
+        output_name = f"{filename}"
+        output_path = os.path.join(OUTPUT_DIR, output_name)
+
+        # RUN PIPELINE
+        raw_df = load_and_prep_data(file_path)
+        enriched_df = add_indicators(raw_df)
+        clean_and_save(enriched_df, output_path)
+
+        return f"Success: {filename}"
+
+    except Exception as e:
+        return f"Error ({os.path.basename(file_path)}): {str(e)}"
+
+
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
-    # CONFIGURATION
-    INPUT_DIR = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/fin_data/"
-    OUTPUT_DIR = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/fin_process/"
+    start_time = time.time()
 
     if not os.path.exists(INPUT_DIR):
         print(f"Error: Input directory {INPUT_DIR} not found.")
@@ -143,28 +166,34 @@ if __name__ == "__main__":
             os.makedirs(OUTPUT_DIR)
             print(f"Created output directory: {OUTPUT_DIR}")
 
+        # Find all CSV files in the input directory
         csv_files = glob.glob(os.path.join(INPUT_DIR, "*.csv"))
+        total_files = len(csv_files)
 
         if not csv_files:
             print(f"No CSV files found in {INPUT_DIR}")
         else:
-            print(f"Found {len(csv_files)} files to process.")
+            print(
+                f"Found {total_files} files. Starting multi-threaded processing with {MAX_WORKERS} workers..."
+            )
 
-            for file_path in csv_files:
-                try:
-                    filename = os.path.basename(file_path)
-                    output_name = f"{filename}"  # Output name matches input name
-                    output_path = os.path.join(OUTPUT_DIR, output_name)
+            # Using ThreadPoolExecutor to handle the threading logic
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=MAX_WORKERS
+            ) as executor:
+                # Submit all files to the pool
+                future_to_file = {
+                    executor.submit(process_single_file, f): f for f in csv_files
+                }
 
-                    print(f"Processing {filename}...", end=" ")
+                completed_count = 0
+                for future in concurrent.futures.as_completed(future_to_file):
+                    completed_count += 1
+                    result = future.result()
 
-                    raw_df = load_and_prep_data(file_path)
-                    enriched_df = add_indicators(raw_df)
-                    clean_and_save(enriched_df, output_path)
+                    # Print progress bar style output
+                    print(f"[{completed_count}/{total_files}] {result}")
 
-                    print("Done.")
-
-                except Exception as e:
-                    print(f"\nError processing {filename}: {e}")
-
-            print("--- Batch Processing Complete ---")
+            end_time = time.time()
+            duration = end_time - start_time
+            print(f"--- Batch Processing Complete in {duration:.2f} seconds ---")

@@ -5,24 +5,77 @@ import glob
 import sys
 import matplotlib.pyplot as plt
 import seaborn as sns
+import concurrent.futures
+import time
 
 # Set visual style for plots
 sns.set_theme(style="whitegrid")
 
+# --- GLOBAL CONFIG ---
+# Define paths based on your directory structure
+BASE_DIR = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/"
+MAX_WORKERS = 30  # Number of threads for file reading
+
+
+def process_single_stock_merge(f1):
+    """
+    Worker function: Reads all 4 method files for a SINGLE stock and merges them.
+    Returns: The merged DataFrame for that stock (or None if failed).
+    """
+    try:
+        # Define sub-folder paths
+        path_m2 = os.path.join(BASE_DIR, "statistical")
+        path_m3 = os.path.join(BASE_DIR, "forest")
+        path_m4 = os.path.join(BASE_DIR, "clustering")
+
+        # 1. Identify the core filename (e.g., "AAPL.csv")
+        basename = os.path.basename(f1)
+
+        # 2. Construct paths for other methods using the exact same filename
+        f2 = os.path.join(path_m2, basename)
+        f3 = os.path.join(path_m3, basename)
+        f4 = os.path.join(path_m4, basename)
+
+        # 3. Load Method 1 (Master) - Regression
+        df1 = pd.read_csv(f1)
+
+        # 4. Merge Method 2 (Statistical)
+        if os.path.exists(f2):
+            df2 = pd.read_csv(f2)
+            cols_m2 = ["time", "z_score_price", "is_volume_shock", "silent_anomaly"]
+            df1 = pd.merge(df1, df2[cols_m2], on="time", how="left")
+
+        # 5. Merge Method 3 (Isolation Forest)
+        if os.path.exists(f3):
+            df3 = pd.read_csv(f3)
+            cols_m3 = [
+                "time",
+                "iso_forest_outlier",
+                "iso_forest_score",
+                "smooth_velocity",
+                "psi",
+            ]
+            df1 = pd.merge(df1, df3[cols_m3], on="time", how="left")
+
+        # 6. Merge Method 4 (DBSCAN)
+        if os.path.exists(f4):
+            df4 = pd.read_csv(f4)
+            cols_m4 = ["time", "dbscan_cluster"]
+            df1 = pd.merge(df1, df4[cols_m4], on="time", how="left")
+
+        return df1
+
+    except Exception as e:
+        print(f"Warning: Failed to merge for {os.path.basename(f1)}: {e}")
+        return None
+
 
 def aggregate_all_results(base_dir):
     """
-    Merges the separated result files from Method 1, 2, 3, and 4 into a single Global DataFrame.
+    Multi-threaded aggregation of all result files.
     """
-    print("--- Starting Global Aggregation ---")
-
-    # Define paths based on your directory structure
+    print("--- Starting Global Aggregation (Multi-Threaded) ---")
     path_m1 = os.path.join(base_dir, "regression")
-    path_m2 = os.path.join(base_dir, "statistical")
-    path_m3 = os.path.join(base_dir, "forest")
-    path_m4 = os.path.join(base_dir, "clustering")
-
-    all_dfs = []
 
     # Get all Method 1 files as the "base" list
     reg_files = glob.glob(os.path.join(path_m1, "*.csv"))
@@ -33,52 +86,23 @@ def aggregate_all_results(base_dir):
 
     print(f"Found {len(reg_files)} stock files. Merging...")
 
-    for f1 in reg_files:
-        try:
-            # 1. Identify the core filename (e.g., "AAPL.csv")
-            basename = os.path.basename(f1)
+    all_dfs = []
 
-            # 2. Construct paths for other methods using the exact same filename
-            f2 = os.path.join(path_m2, basename)
-            f3 = os.path.join(path_m3, basename)
-            f4 = os.path.join(path_m4, basename)
+    # --- PARALLEL EXECUTION START ---
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        # Map the worker function to the file list
+        # list() forces the iterator to execute immediately
+        results = list(executor.map(process_single_stock_merge, reg_files))
+    # --- PARALLEL EXECUTION END ---
 
-            # 3. Load Method 1 (Master) - Regression
-            df1 = pd.read_csv(f1)
-
-            # 4. Merge Method 2 (Statistical)
-            if os.path.exists(f2):
-                df2 = pd.read_csv(f2)
-                cols_m2 = ["time", "z_score_price", "is_volume_shock", "silent_anomaly"]
-                df1 = pd.merge(df1, df2[cols_m2], on="time", how="left")
-
-            # 5. Merge Method 3 (Isolation Forest)
-            if os.path.exists(f3):
-                df3 = pd.read_csv(f3)
-                cols_m3 = [
-                    "time",
-                    "iso_forest_outlier",
-                    "iso_forest_score",
-                    "smooth_velocity",
-                    "psi",
-                ]
-                df1 = pd.merge(df1, df3[cols_m3], on="time", how="left")
-
-            # 6. Merge Method 4 (DBSCAN)
-            if os.path.exists(f4):
-                df4 = pd.read_csv(f4)
-                cols_m4 = ["time", "dbscan_cluster"]
-                df1 = pd.merge(df1, df4[cols_m4], on="time", how="left")
-
-            all_dfs.append(df1)
-
-        except Exception as e:
-            print(f"Warning: Failed to merge for {basename}: {e}")
+    # Filter out None results (failures)
+    all_dfs = [df for df in results if df is not None]
 
     if not all_dfs:
         print("No data could be aggregated.")
         return pd.DataFrame()
 
+    print("Merging into Master DataFrame...")
     # Create the Master DataFrame
     master_df = pd.concat(all_dfs, ignore_index=True)
 
@@ -243,8 +267,7 @@ def generate_text_report(df, output_dir):
 
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
-    # CONFIGURATION
-    BASE_DIR = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/"
+    start_time = time.time()
 
     # Output folder
     OUTPUT_DIR = os.path.join(BASE_DIR, "final_study_output")
@@ -252,17 +275,22 @@ if __name__ == "__main__":
     if not os.path.exists(OUTPUT_DIR):
         os.makedirs(OUTPUT_DIR)
 
-    # 1. Aggregate
+    # 1. Aggregate (Now Parallelized)
     global_df = aggregate_all_results(BASE_DIR)
 
     if not global_df.empty:
-        # 2. Visualize
+        # 2. Visualize (Must be Sequential)
         generate_plots(global_df, OUTPUT_DIR)
 
-        # 3. Report
+        # 3. Report (Must be Sequential)
         generate_text_report(global_df, OUTPUT_DIR)
 
         # 4. Save Data
         global_df.to_csv(
             os.path.join(OUTPUT_DIR, "study_master_dataset.csv"), index=False
         )
+
+    end_time = time.time()
+    print(
+        f"--- Full Study Inference Complete in {end_time - start_time:.2f} seconds ---"
+    )

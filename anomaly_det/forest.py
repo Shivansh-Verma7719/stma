@@ -4,9 +4,20 @@ from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
 import os
 import glob
+import concurrent.futures
+import time
+
+# --- CONFIGURATION ---
+INPUT_DIR = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/fin_process/"
+OUTPUT_DIR = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/forest/"
+MAX_WORKERS = 12  # Number of parallel threads
 
 
 def run_isolation_forest(input_file, output_file):
+    """
+    Core logic: Trains Isolation Forest to find context-based anomalies.
+    Returns a status string.
+    """
     # 1. Load Data
     df = pd.read_csv(input_file)
 
@@ -21,8 +32,7 @@ def run_isolation_forest(input_file, output_file):
         "STX",
     ]
     if not all(col in df.columns for col in required_cols):
-        print(f"Skipping {os.path.basename(input_file)}: Missing required columns.")
-        return
+        return f"Skipped: Missing required columns"
 
     # 2. Preprocessing for ML
     # We need purely numeric data.
@@ -44,11 +54,11 @@ def run_isolation_forest(input_file, output_file):
     ]
 
     # Create a clean subset for training (drop rows with NaNs)
+    # We keep the index so we can merge back later
     ml_data = df[features].dropna()
 
     if len(ml_data) < 50:
-        print(f"Skipping {os.path.basename(input_file)}: Not enough clean data for ML.")
-        return
+        return "Skipped: Not enough clean data for ML"
 
     # 3. Scaling
     # Crucial because Volume (millions) is much larger than Sentiment (-1 to 1)
@@ -90,12 +100,34 @@ def run_isolation_forest(input_file, output_file):
     final_df = df[output_cols].sort_values("iso_forest_score", ascending=True)
 
     final_df.to_csv(output_file, index=False)
+    return "Success"
 
 
+def process_single_file(file_path):
+    """
+    Worker function to process a single CSV file.
+    """
+    try:
+        filename = os.path.basename(file_path)
+        output_name = f"{filename}"  # Keeping original name structure
+        output_path = os.path.join(OUTPUT_DIR, output_name)
+
+        # Run the core logic
+        status = run_isolation_forest(file_path, output_path)
+
+        # Return formatted message for the progress tracker
+        if status == "Success":
+            return f"Success: {filename}"
+        else:
+            return f"{status} ({filename})"
+
+    except Exception as e:
+        return f"Error ({os.path.basename(file_path)}): {str(e)}"
+
+
+# --- MAIN EXECUTION ---
 if __name__ == "__main__":
-    # CONFIGURATION
-    INPUT_DIR = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/fin_process/"
-    OUTPUT_DIR = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/forest/"
+    start_time = time.time()
 
     if not os.path.exists(INPUT_DIR):
         print(f"Error: Input directory {INPUT_DIR} not found.")
@@ -104,25 +136,36 @@ if __name__ == "__main__":
             os.makedirs(OUTPUT_DIR)
             print(f"Created output directory: {OUTPUT_DIR}")
 
+        # Find all processed CSV files
         csv_files = glob.glob(os.path.join(INPUT_DIR, "*.csv"))
+        total_files = len(csv_files)
 
         if not csv_files:
             print(f"No CSV files found in {INPUT_DIR}")
         else:
-            print(f"Found {len(csv_files)} files to process.")
+            print(
+                f"Found {total_files} files. Starting Isolation Forest with {MAX_WORKERS} threads..."
+            )
 
-            for file_path in csv_files:
-                try:
-                    filename = os.path.basename(file_path)
-                    # Keeping original name
-                    output_name = f"{filename}"
-                    output_path = os.path.join(OUTPUT_DIR, output_name)
+            # Using ThreadPoolExecutor
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=MAX_WORKERS
+            ) as executor:
+                # Submit all files
+                future_to_file = {
+                    executor.submit(process_single_file, f): f for f in csv_files
+                }
 
-                    print(f"Processing {filename}...", end=" ")
-                    run_isolation_forest(file_path, output_path)
-                    print("Done.")
+                completed_count = 0
+                for future in concurrent.futures.as_completed(future_to_file):
+                    completed_count += 1
+                    result = future.result()
 
-                except Exception as e:
-                    print(f"\nError processing {filename}: {e}")
+                    # Print progress
+                    print(f"[{completed_count}/{total_files}] {result}")
 
-            print("--- Isolation Forest Analysis Complete ---")
+            end_time = time.time()
+            duration = end_time - start_time
+            print(
+                f"--- Isolation Forest Analysis Complete in {duration:.2f} seconds ---"
+            )

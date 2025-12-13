@@ -3,20 +3,27 @@ import numpy as np
 from sklearn.linear_model import LinearRegression
 import os
 import glob
+import concurrent.futures
+import time
+
+# --- CONFIGURATION ---
+INPUT_DIR = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/fin_process/"
+OUTPUT_DIR = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/regression"
+MAX_WORKERS = 12  # Number of parallel threads
 
 
 def run_regression_anomaly(input_file, output_file):
+    """
+    Core logic: Calculates the linear regression residuals between Bias Index and Returns.
+    Returns a status string (e.g., "Success", "Skipped").
+    """
     # 1. Load Data
     df = pd.read_csv(input_file)
 
     # Check if necessary columns exist
-    # UPDATED: We now check for 'bias_index' instead of flag/positive/negative
     required_cols = ["intc", "bias_index", "time", "stock_name"]
     if not all(col in df.columns for col in required_cols):
-        print(
-            f"Skipping {os.path.basename(input_file)}: Missing required columns (need 'bias_index')."
-        )
-        return
+        return f"Skipped: Missing required columns (need 'bias_index')"
 
     # 2. Prepare Variables
     # Calculate Daily Log Returns: ln(Price_t / Price_t-1)
@@ -27,8 +34,7 @@ def run_regression_anomaly(input_file, output_file):
 
     # Check if enough data points exist for regression
     if len(data_for_model) < 10:
-        print(f"Skipping {os.path.basename(input_file)}: Not enough data points.")
-        return
+        return "Skipped: Not enough data points"
 
     # 3. Train Regression Model
     # X = bias_index (The Cause: -1 to 1), y = Return (The Effect)
@@ -37,10 +43,6 @@ def run_regression_anomaly(input_file, output_file):
 
     model = LinearRegression()
     model.fit(X, y)
-
-    # Optional: Print how much the market cares about sentiment for this stock
-    # coeff = model.coef_[0]
-    # print(f"  > Sentiment Elasticity: {coeff:.5f}")
 
     # 4. Predict and Calculate Residuals
     data_for_model["expected_return"] = model.predict(X)
@@ -54,7 +56,6 @@ def run_regression_anomaly(input_file, output_file):
     data_for_model["bias_score_regression"] = data_for_model["reg_residual"].abs()
 
     # 5. Save Results
-    # UPDATED: Saving 'bias_index' instead of flag/net_sentiment
     output_cols = [
         "time",
         "stock_name",
@@ -69,13 +70,34 @@ def run_regression_anomaly(input_file, output_file):
     )
 
     final_df.to_csv(output_file, index=False)
-    # print(f"Saved: {output_file}")
+    return "Success"
 
 
+def process_single_file(file_path):
+    """
+    Worker function to process a single CSV file.
+    """
+    try:
+        filename = os.path.basename(file_path)
+        output_name = f"{filename}"  # Keeping original name structure
+        output_path = os.path.join(OUTPUT_DIR, output_name)
+
+        # Run the core logic
+        status = run_regression_anomaly(file_path, output_path)
+
+        # Return formatted message for the progress tracker
+        if status == "Success":
+            return f"Success: {filename}"
+        else:
+            return f"{status} ({filename})"
+
+    except Exception as e:
+        return f"Error ({os.path.basename(file_path)}): {str(e)}"
+
+
+# --- MAIN EXECUTION ---
 if __name__ == "__main__":
-    # CONFIGURATION
-    INPUT_DIR = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/fin_process/"
-    OUTPUT_DIR = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/regression"
+    start_time = time.time()
 
     # Check input directory
     if not os.path.exists(INPUT_DIR):
@@ -88,24 +110,32 @@ if __name__ == "__main__":
 
         # Find all processed CSV files
         csv_files = glob.glob(os.path.join(INPUT_DIR, "*.csv"))
+        total_files = len(csv_files)
 
         if not csv_files:
             print(f"No CSV files found in {INPUT_DIR}")
         else:
-            print(f"Found {len(csv_files)} files to process.")
+            print(
+                f"Found {total_files} files. Starting regression with {MAX_WORKERS} threads..."
+            )
 
-            for file_path in csv_files:
-                try:
-                    filename = os.path.basename(file_path)
-                    # Name the result file clearly
-                    output_name = f"{filename}"  # Keeping original name structure
-                    output_path = os.path.join(OUTPUT_DIR, output_name)
+            # Using ThreadPoolExecutor
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=MAX_WORKERS
+            ) as executor:
+                # Submit all files
+                future_to_file = {
+                    executor.submit(process_single_file, f): f for f in csv_files
+                }
 
-                    print(f"Processing {filename}...", end=" ")
-                    run_regression_anomaly(file_path, output_path)
-                    print("Done.")
+                completed_count = 0
+                for future in concurrent.futures.as_completed(future_to_file):
+                    completed_count += 1
+                    result = future.result()
 
-                except Exception as e:
-                    print(f"\nError processing {filename}: {e}")
+                    # Print progress
+                    print(f"[{completed_count}/{total_files}] {result}")
 
-            print("--- Regression Analysis Complete ---")
+            end_time = time.time()
+            duration = end_time - start_time
+            print(f"--- Regression Analysis Complete in {duration:.2f} seconds ---")

@@ -2,9 +2,20 @@ import pandas as pd
 import numpy as np
 import os
 import glob
+import concurrent.futures
+import time
+
+# --- CONFIGURATION ---
+INPUT_DIR = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/fin_process/"
+OUTPUT_DIR = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/statistical"
+MAX_WORKERS = 12  # Number of parallel threads
 
 
 def run_statistical_anomaly(input_file, output_file):
+    """
+    Core logic: Detects 'Silent Shocks' and 'Volume Anomalies'.
+    Returns a status string (e.g., "Success", "Skipped").
+    """
     # 1. Load Data
     df = pd.read_csv(input_file)
 
@@ -12,15 +23,11 @@ def run_statistical_anomaly(input_file, output_file):
     # UPDATED: We now require 'rel_vol' (from feature engineering)
     required_cols = ["intc", "v", "rel_vol", "bias_index", "time", "stock_name"]
     if not all(col in df.columns for col in required_cols):
-        print(
-            f"Skipping {os.path.basename(input_file)}: Missing required columns (need 'rel_vol' & 'bias_index')."
-        )
-        return
+        return f"Skipped: Missing required columns (need 'rel_vol' & 'bias_index')"
 
     # Check for sufficient data
     if len(df) < 10:
-        print(f"Skipping {os.path.basename(input_file)}: Not enough data points.")
-        return
+        return "Skipped: Not enough data points"
 
     # 2. Pre-calculation
     # Log Returns for Price
@@ -75,12 +82,34 @@ def run_statistical_anomaly(input_file, output_file):
     final_df = df[output_cols].sort_values("z_score_price", key=abs, ascending=False)
 
     final_df.to_csv(output_file, index=False)
+    return "Success"
 
 
+def process_single_file(file_path):
+    """
+    Worker function to process a single CSV file.
+    """
+    try:
+        filename = os.path.basename(file_path)
+        output_name = f"{filename}"  # Keeping original name structure
+        output_path = os.path.join(OUTPUT_DIR, output_name)
+
+        # Run the core logic
+        status = run_statistical_anomaly(file_path, output_path)
+
+        # Return formatted message for the progress tracker
+        if status == "Success":
+            return f"Success: {filename}"
+        else:
+            return f"{status} ({filename})"
+
+    except Exception as e:
+        return f"Error ({os.path.basename(file_path)}): {str(e)}"
+
+
+# --- MAIN EXECUTION ---
 if __name__ == "__main__":
-    # CONFIGURATION
-    INPUT_DIR = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/fin_process/"
-    OUTPUT_DIR = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/statistical"
+    start_time = time.time()
 
     # Check input directory
     if not os.path.exists(INPUT_DIR):
@@ -93,24 +122,32 @@ if __name__ == "__main__":
 
         # Find all processed CSV files
         csv_files = glob.glob(os.path.join(INPUT_DIR, "*.csv"))
+        total_files = len(csv_files)
 
         if not csv_files:
             print(f"No CSV files found in {INPUT_DIR}")
         else:
-            print(f"Found {len(csv_files)} files to process.")
+            print(
+                f"Found {total_files} files. Starting statistical analysis with {MAX_WORKERS} threads..."
+            )
 
-            for file_path in csv_files:
-                try:
-                    filename = os.path.basename(file_path)
-                    # Name the result file clearly
-                    output_name = f"{filename}"
-                    output_path = os.path.join(OUTPUT_DIR, output_name)
+            # Using ThreadPoolExecutor
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=MAX_WORKERS
+            ) as executor:
+                # Submit all files
+                future_to_file = {
+                    executor.submit(process_single_file, f): f for f in csv_files
+                }
 
-                    print(f"Processing {filename}...", end=" ")
-                    run_statistical_anomaly(file_path, output_path)
-                    print("Done.")
+                completed_count = 0
+                for future in concurrent.futures.as_completed(future_to_file):
+                    completed_count += 1
+                    result = future.result()
 
-                except Exception as e:
-                    print(f"\nError processing {filename}: {e}")
+                    # Print progress
+                    print(f"[{completed_count}/{total_files}] {result}")
 
-            print("--- Statistical Anomaly Analysis Complete ---")
+            end_time = time.time()
+            duration = end_time - start_time
+            print(f"--- Statistical Analysis Complete in {duration:.2f} seconds ---")
