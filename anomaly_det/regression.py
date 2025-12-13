@@ -10,20 +10,20 @@ def run_regression_anomaly(input_file, output_file):
     df = pd.read_csv(input_file)
 
     # Check if necessary columns exist
-    required_cols = ["intc", "positive", "negative", "time", "stock_name", "flag"]
+    # UPDATED: We now check for 'bias_index' instead of flag/positive/negative
+    required_cols = ["intc", "bias_index", "time", "stock_name"]
     if not all(col in df.columns for col in required_cols):
-        print(f"Skipping {os.path.basename(input_file)}: Missing required columns.")
+        print(
+            f"Skipping {os.path.basename(input_file)}: Missing required columns (need 'bias_index')."
+        )
         return
 
     # 2. Prepare Variables
     # Calculate Daily Log Returns: ln(Price_t / Price_t-1)
     df["log_returns"] = np.log(df["intc"] / df["intc"].shift(1))
 
-    # Calculate Net Sentiment (1 = Pos, -1 = Neg, 0 = Neutral)
-    df["net_sentiment"] = df["positive"] - df["negative"]
-
-    # Drop the first row (NaN return) to avoid errors
-    data_for_model = df.dropna(subset=["log_returns", "net_sentiment"]).copy()
+    # Drop the first row (NaN return) and any rows where bias_index is missing
+    data_for_model = df.dropna(subset=["log_returns", "bias_index"]).copy()
 
     # Check if enough data points exist for regression
     if len(data_for_model) < 10:
@@ -31,14 +31,16 @@ def run_regression_anomaly(input_file, output_file):
         return
 
     # 3. Train Regression Model
-    # X = Sentiment (The Cause), y = Return (The Effect)
-    X = data_for_model[["net_sentiment"]]
+    # X = bias_index (The Cause: -1 to 1), y = Return (The Effect)
+    X = data_for_model[["bias_index"]]
     y = data_for_model["log_returns"]
 
     model = LinearRegression()
     model.fit(X, y)
 
-    # print(f"Model Coefficient (Impact of News): {model.coef_[0]:.5f}")
+    # Optional: Print how much the market cares about sentiment for this stock
+    # coeff = model.coef_[0]
+    # print(f"  > Sentiment Elasticity: {coeff:.5f}")
 
     # 4. Predict and Calculate Residuals
     data_for_model["expected_return"] = model.predict(X)
@@ -52,11 +54,11 @@ def run_regression_anomaly(input_file, output_file):
     data_for_model["bias_score_regression"] = data_for_model["reg_residual"].abs()
 
     # 5. Save Results
+    # UPDATED: Saving 'bias_index' instead of flag/net_sentiment
     output_cols = [
         "time",
         "stock_name",
-        "flag",
-        "net_sentiment",
+        "bias_index",
         "intc",
         "log_returns",
         "expected_return",
@@ -72,7 +74,6 @@ def run_regression_anomaly(input_file, output_file):
 
 if __name__ == "__main__":
     # CONFIGURATION
-    # Input is the output from the previous step (fin_process)
     INPUT_DIR = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/fin_process/"
     OUTPUT_DIR = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/regression"
 
@@ -97,7 +98,7 @@ if __name__ == "__main__":
                 try:
                     filename = os.path.basename(file_path)
                     # Name the result file clearly
-                    output_name = f"{filename}"
+                    output_name = f"{filename}"  # Keeping original name structure
                     output_path = os.path.join(OUTPUT_DIR, output_name)
 
                     print(f"Processing {filename}...", end=" ")

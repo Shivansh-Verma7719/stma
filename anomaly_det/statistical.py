@@ -9,9 +9,12 @@ def run_statistical_anomaly(input_file, output_file):
     df = pd.read_csv(input_file)
 
     # Check if necessary columns exist
-    required_cols = ["intc", "v", "flag", "time", "stock_name"]
+    # UPDATED: We now require 'rel_vol' (from feature engineering)
+    required_cols = ["intc", "v", "rel_vol", "bias_index", "time", "stock_name"]
     if not all(col in df.columns for col in required_cols):
-        print(f"Skipping {os.path.basename(input_file)}: Missing required columns.")
+        print(
+            f"Skipping {os.path.basename(input_file)}: Missing required columns (need 'rel_vol' & 'bias_index')."
+        )
         return
 
     # Check for sufficient data
@@ -34,36 +37,36 @@ def run_statistical_anomaly(input_file, output_file):
     else:
         df["z_score_price"] = (df["log_returns"] - mean_ret) / std_ret
 
-    # 4. Volume Anomaly: IQR (Interquartile Range)
-    # Volume is often non-normal (fat-tailed), so Z-score is bad. IQR is better.
-    Q1 = df["v"].quantile(0.25)
-    Q3 = df["v"].quantile(0.75)
-    IQR = Q3 - Q1
+    # 4. Volume Anomaly: Relative Volume (The 10-Year Fix)
+    # OLD WAY: Global IQR (Bad for long timeframes)
+    # NEW WAY: Is today's volume 3x higher than the recent 50-day average?
 
-    # Threshold: High Volume is anything above Q3 + 1.5*IQR
-    vol_threshold = Q3 + (1.5 * IQR)
-    df["is_volume_shock"] = df["v"] > vol_threshold
+    # We define a shock as Relative Volume > 3.0 (300% of normal)
+    df["is_volume_shock"] = df["rel_vol"] > 3.0
 
     # 5. The "Silent" Anomaly (The Leak Detector)
-    # Logic: A huge price shock (> 3 sigma) OR Volume Shock...
-    # ... BUT the News Flag is 0 (No news reported).
+    # Logic: A huge price shock (> 3 sigma) OR Volume Shock (> 3x normal)...
+    # ... BUT the Bias Index is Neutral (No strong sentiment driving it).
 
     df["silent_anomaly"] = False
 
     # Define "Huge Shock" as > 3 Std Devs or Volume Shock
     shock_condition = (df["z_score_price"].abs() > 3) | (df["is_volume_shock"])
-    no_news_condition = df["flag"] == 0
+
+    # Define "No News" as Bias Index being very close to 0 (e.g., within +/- 0.1)
+    neutral_threshold = 0.1
+    no_news_condition = df["bias_index"].abs() < neutral_threshold
 
     df.loc[shock_condition & no_news_condition, "silent_anomaly"] = True
 
     # 6. Save Results
-    # We want to keep the Z-score to measure magnitude of the shock
     output_cols = [
         "time",
         "stock_name",
-        "flag",
+        "bias_index",
         "intc",
         "v",
+        "rel_vol",  # Added so you can see the relative volume score
         "z_score_price",
         "is_volume_shock",
         "silent_anomaly",
@@ -72,10 +75,6 @@ def run_statistical_anomaly(input_file, output_file):
     final_df = df[output_cols].sort_values("z_score_price", key=abs, ascending=False)
 
     final_df.to_csv(output_file, index=False)
-
-    # Optional: Print stats for this specific file
-    # count = final_df['silent_anomaly'].sum()
-    # print(f"  > Silent Anomalies found: {count}")
 
 
 if __name__ == "__main__":

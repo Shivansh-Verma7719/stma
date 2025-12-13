@@ -11,10 +11,9 @@ def run_isolation_forest(input_file, output_file):
     df = pd.read_csv(input_file)
 
     # Check for necessary columns
-    # We need the indicators we generated in feature_engineering
+    # UPDATED: Checking for 'bias_index' instead of positive/negative
     required_cols = [
-        "positive",
-        "negative",
+        "bias_index",
         "smooth_velocity",
         "psi",
         "macd",
@@ -34,10 +33,9 @@ def run_isolation_forest(input_file, output_file):
     df["trend_score"] = df["trend_score"].fillna(0)
 
     # Select Features for the Model
-    # We include Cause (News), Effect (Velocity), and Context (Volatility, Volume, Trend)
+    # UPDATED: Using 'bias_index' (Continuous) instead of binary flags
     features = [
-        "positive",
-        "negative",  # The News
+        "bias_index",  # The News (Continuous -1 to 1)
         "smooth_velocity",  # The Price Reaction
         "psi",  # The Volatility State
         "macd",  # The Volume Flow (OBV)
@@ -46,7 +44,6 @@ def run_isolation_forest(input_file, output_file):
     ]
 
     # Create a clean subset for training (drop rows with NaNs)
-    # We keep the index so we can merge back later
     ml_data = df[features].dropna()
 
     if len(ml_data) < 50:
@@ -54,7 +51,7 @@ def run_isolation_forest(input_file, output_file):
         return
 
     # 3. Scaling
-    # Crucial because Volume (millions) is much larger than Sentiment (0/1)
+    # Crucial because Volume (millions) is much larger than Sentiment (-1 to 1)
     scaler = StandardScaler()
     ml_data_scaled = scaler.fit_transform(ml_data)
 
@@ -76,13 +73,11 @@ def run_isolation_forest(input_file, output_file):
     df.loc[ml_data.index, "iso_forest_score"] = ml_data["iso_forest_score"]
 
     # 6. Save Results
-    # We focus on the rows identified as Anomalies (-1)
+    # UPDATED output columns
     output_cols = [
         "time",
         "stock_name",
-        "flag",
-        "positive",
-        "negative",
+        "bias_index",
         "intc",
         "v",
         "iso_forest_outlier",
@@ -95,10 +90,6 @@ def run_isolation_forest(input_file, output_file):
     final_df = df[output_cols].sort_values("iso_forest_score", ascending=True)
 
     final_df.to_csv(output_file, index=False)
-
-    # Optional: Stats
-    # num_anomalies = (final_df['iso_forest_outlier'] == -1).sum()
-    # print(f"  > Anomalies detected: {num_anomalies}")
 
 
 if __name__ == "__main__":
@@ -123,6 +114,7 @@ if __name__ == "__main__":
             for file_path in csv_files:
                 try:
                     filename = os.path.basename(file_path)
+                    # Keeping original name
                     output_name = f"{filename}"
                     output_path = os.path.join(OUTPUT_DIR, output_name)
 

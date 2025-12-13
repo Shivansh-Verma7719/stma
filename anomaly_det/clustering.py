@@ -11,7 +11,8 @@ def run_dbscan_clustering(input_file, output_file):
     df = pd.read_csv(input_file)
 
     # Check for columns
-    required_cols = ["intc", "positive", "negative", "time", "stock_name"]
+    # UPDATED: Checking for 'bias_index' instead of positive/negative
+    required_cols = ["intc", "bias_index", "time", "stock_name"]
     if not all(col in df.columns for col in required_cols):
         print(f"Skipping {os.path.basename(input_file)}: Missing required columns.")
         return
@@ -22,11 +23,9 @@ def run_dbscan_clustering(input_file, output_file):
     # Log Returns
     df["log_returns"] = np.log(df["intc"] / df["intc"].shift(1))
 
-    # Net Sentiment
-    df["net_sentiment"] = df["positive"] - df["negative"]
-
+    # UPDATED: Use bias_index directly as the sentiment feature
     # Drop NaNs
-    cluster_data = df[["net_sentiment", "log_returns"]].dropna()
+    cluster_data = df[["bias_index", "log_returns"]].dropna()
 
     if len(cluster_data) < 50:
         print(
@@ -35,15 +34,14 @@ def run_dbscan_clustering(input_file, output_file):
         return
 
     # 3. Scaling
-    # Essential for DBSCAN because Sentiment (range -1 to 1) and Returns (range -0.05 to 0.05)
+    # Essential for DBSCAN because Sentiment (-1 to 1) and Returns (~ -0.05 to 0.05)
     # are on different scales.
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(cluster_data)
 
     # 4. Run DBSCAN
-    # eps=0.5: The maximum distance between two samples for one to be considered as in the neighborhood of the other.
-    # min_samples=10: The number of samples in a neighborhood for a point to be considered as a core point.
-    # You might need to tune 'eps' depending on your specific data density.
+    # eps=0.5: Maximum distance between two samples for one to be considered in the neighborhood.
+    # min_samples=10: Number of samples in a neighborhood for a point to be a core point.
     dbscan = DBSCAN(eps=0.5, min_samples=10)
 
     # Fit and Predict
@@ -56,11 +54,11 @@ def run_dbscan_clustering(input_file, output_file):
 
     # 6. Save Results
     # We prioritize the Noise points (-1)
+    # UPDATED: Output bias_index instead of flag/net_sentiment
     output_cols = [
         "time",
         "stock_name",
-        "flag",
-        "net_sentiment",
+        "bias_index",
         "log_returns",
         "dbscan_cluster",  # The Output (-1 = Anomaly)
     ]
@@ -69,10 +67,6 @@ def run_dbscan_clustering(input_file, output_file):
     final_df = df[output_cols].sort_values("dbscan_cluster")
 
     final_df.to_csv(output_file, index=False)
-
-    # Optional: Debug Print
-    # n_noise = (cluster_labels == -1).sum()
-    # print(f"  > Noise points (Anomalies): {n_noise}")
 
 
 if __name__ == "__main__":
@@ -97,6 +91,7 @@ if __name__ == "__main__":
             for file_path in csv_files:
                 try:
                     filename = os.path.basename(file_path)
+                    # Keeping original name
                     output_name = f"{filename}"
                     output_path = os.path.join(OUTPUT_DIR, output_name)
 
