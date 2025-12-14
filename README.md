@@ -7,7 +7,7 @@ A comprehensive financial data analysis and anomaly detection system for S&P 500
 This project provides an end-to-end pipeline for:
 - **Data Collection**: Fetching financial data, news articles, and Reddit posts for S&P 500 companies
 - **Sentiment Analysis**: Using BERT-based models to analyze article sentiment
-- **Anomaly Detection**: Detecting market anomalies using multiple ML methods (regression, statistical, isolation forest, clustering)
+- **Anomaly Detection**: Detecting market anomalies using statistical methods, media follow analysis, and event studies
 - **Infrastructure**: AWS-based infrastructure with PostgreSQL database
 
 ## Project Structure
@@ -15,21 +15,23 @@ This project provides an end-to-end pipeline for:
 ```
 stma/
 ├── anomaly_det/          # Anomaly detection system
-│   ├── clustering/       # DBSCAN clustering results
-│   ├── fetch/            # Raw financial data
-│   ├── fin_data/         # Processed financial data with bias index
-│   ├── fin_process/      # Feature-engineered data
-│   ├── forest/           # Isolation Forest results
-│   ├── regression/       # Regression anomaly results
-│   ├── statistical/     # Statistical anomaly results
-│   ├── indicators/      # Custom technical indicators
-│   ├── clustering.py    # DBSCAN clustering anomaly detection
+│   ├── indicators/       # Custom technical indicators
+│   │   ├── velocity_indicator.py
+│   │   ├── supertrend.py
+│   │   ├── impulsemacd.py
+│   │   ├── squeeze.py
+│   │   └── obv.py
+│   ├── event_study/     # Event study analysis outputs
+│   ├── final_study_output/  # Final aggregated results and reports
+│   ├── narrative_test/  # Media follow analysis outputs
+│   ├── main.py          # Main orchestration pipeline (entry point)
+│   ├── helper.py        # Data fetching from database
+│   ├── helper2.py       # Market data processing utilities
 │   ├── feature_engineering.py  # Technical indicator calculation
-│   ├── forest.py        # Isolation Forest anomaly detection
-│   ├── helper.py        # Data preparation utilities
-│   ├── inference.py     # Main inference pipeline (merges all methods)
-│   ├── regression.py    # Regression-based anomaly detection
-│   └── statistical.py   # Statistical anomaly detection
+│   ├── statistical.py   # Statistical anomaly detection
+│   ├── inference.py     # Aggregation and report generation
+│   ├── media_follow.py  # Media follow analysis (trend follower vs contrarian)
+│   └── study.py         # Event study analysis
 ├── data/                # Reference data (e.g., sp500.csv)
 ├── fin_data/            # Financial data files (CSV per ticker)
 ├── infra/               # Infrastructure as Code
@@ -155,65 +157,53 @@ python BERT.py  # Analyze article sentiment using FinBERT
 
 ### 5. Anomaly Detection Pipeline
 
-The anomaly detection system processes financial data through multiple methods:
+The anomaly detection system processes financial data through an integrated pipeline:
 
-#### Step 1: Feature Engineering
-Add technical indicators to financial data:
+#### Running the Complete Pipeline
+
+The main entry point runs all processing steps in order:
+
 ```bash
 cd anomaly_det
-python feature_engineering.py
+python main.py
 ```
 
-#### Step 2: Run Anomaly Detection Methods
+This single command executes the complete pipeline:
+1. **Data Fetching**: Retrieves data from the database
+2. **Market Data Processing**: Processes and normalizes market data (renames `norm_bias_score` to `bias_index`)
+3. **Feature Engineering**: Adds technical indicators (velocity, OBV, MACD, impulse, supertrend, squeeze)
+4. **Statistical Anomaly Detection**: Detects silent shocks and volume anomalies using Z-scores
+5. **Result Aggregation**: Aggregates statistical results and generates reports
+6. **Media Follow Analysis**: Analyzes whether media follows or contradicts price trends
+7. **Event Study**: Studies media reaction to extreme price movements (>2%)
 
-Run each detection method (they can be run in parallel):
+#### Output Directories
 
-```bash
-# Regression-based anomaly detection
-python regression.py
-
-# Statistical anomaly detection (Z-scores, volume shocks)
-python statistical.py
-
-# Isolation Forest anomaly detection
-python forest.py
-
-# DBSCAN clustering anomaly detection
-python clustering.py
-```
-
-#### Step 3: Inference and Aggregation
-Merge all method results and generate reports:
-```bash
-python inference.py
-```
-
-This will:
-- Merge results from all 4 detection methods
-- Generate visualizations
-- Create a comprehensive text report
-- Save aggregated results to `final_study_output/`
+The pipeline generates outputs in three directories:
+- `final_study_output/`: Silent shock reports and time series plots
+- `narrative_test/`: Media behavior classification (trend follower vs contrarian)
+- `event_study/`: Event study statistics and trajectory plots
 
 ## Anomaly Detection Methods
 
-The system uses four complementary methods:
+The system uses multiple complementary analysis methods:
 
-1. **Regression Anomaly Detection** (`regression.py`)
-   - Models the relationship between bias index (sentiment) and stock returns
-   - Identifies days where actual returns deviate significantly from expected returns
-
-2. **Statistical Anomaly Detection** (`statistical.py`)
+1. **Statistical Anomaly Detection** (`statistical.py`)
    - Z-score analysis for price movements
    - Volume shock detection (relative volume > 3x)
    - "Silent anomaly" detection (price/volume shocks without corresponding sentiment)
+   - Identifies days where market moves occur without matching media sentiment
 
-3. **Isolation Forest** (`forest.py`)
-   - Unsupervised ML method that identifies outliers
-   - Uses multiple features: bias_index, velocity, volatility (psi), MACD, momentum, trend
+2. **Media Follow Analysis** (`media_follow.py`)
+   - Tests whether media sentiment follows or contradicts price movements
+   - Classifies stocks as "Trend Follower" or "Contrarian" based on regression analysis
+   - Uses 14-day lag to test if price returns today affect future media bias
 
-4. **DBSCAN Clustering** (`clustering.py`)
-   - Clusters days based on sentiment vs. returns relationship
-   - Identifies noise points (anomalies) that don't fit normal patterns
+3. **Event Study** (`study.py`)
+   - Analyzes media reaction to extreme price movements (>2% moves)
+   - Tracks bias trajectory 5 days before and 10 days after price shocks
+   - Statistical significance testing for media response patterns
+   - Generates trajectory plots and statistical tables
 
 ## Technical Indicators
 
@@ -238,10 +228,18 @@ Utility scripts in `scripts/`:
 ## Output
 
 The anomaly detection pipeline generates:
-- **CSV Files**: Per-method results in respective directories
-- **Aggregated Dataset**: `final_study_output/study_master_dataset.csv`
-- **Visualizations**: Plots saved to `final_study_output/`
-- **Text Report**: Comprehensive analysis report
+
+### Final Study Output (`final_study_output/`)
+- **Silent Shocks Report**: Text report analyzing silent anomalies
+- **Time Series Plot**: Visualization of silent shock patterns over time
+
+### Narrative Test (`narrative_test/`)
+- **Media Behavior Classification**: Pie chart showing trend follower vs contrarian stocks
+- **Master Report**: CSV with classification results for all stocks
+
+### Event Study (`event_study/`)
+- **Event Study Statistics**: CSV and PNG table with statistical significance results
+- **Trajectory Plot**: Visualization of media bias path before and after price shocks
 
 ## Development
 
