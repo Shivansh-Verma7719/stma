@@ -212,15 +212,9 @@ def process_company(ticker, bias_dates, progress, task_id):
     finally:
         conn.close()
 
-def main():
+def run_bias_calculation(prod_mode=False):
     global TEST_MODE
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--prod", action="store_true", help="Run in production mode (write to DB)")
-    args = parser.parse_args()
-    
-    if args.prod:
-        TEST_MODE = False
+    TEST_MODE = not prod_mode
     
     mode_str = "[red]PRODUCTION[/red]" if not TEST_MODE else "[yellow]TEST (Dry Run)[/yellow]"
     console.print(f"[bold]Starting Bias Score Pipeline - Mode: {mode_str}[/bold]")
@@ -314,6 +308,11 @@ def main():
         console.print(f"[red]Critical Error: {e}[/red]")
 
 if __name__ == "__main__":
-    # Import execution_extras here if needed
+    import argparse
     import psycopg2.extras
-    main()
+    
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--prod", action="store_true", help="Run in production mode (write to DB)")
+    args = parser.parse_args()
+    
+    run_bias_calculation(prod_mode=args.prod)

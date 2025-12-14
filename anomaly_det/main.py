@@ -1,8 +1,3 @@
-"""
-Main orchestration script for anomaly detection pipeline.
-Runs all processing steps in order without saving intermediate CSVs.
-"""
-
 import warnings
 import time
 import pandas as pd
@@ -35,7 +30,7 @@ from study import run_event_study_in_memory
 import os
 
 
-def main():
+def run_anomaly_pipeline():
     """
     Main pipeline that runs all processing steps in order.
     """
@@ -159,4 +154,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    run_anomaly_pipeline()

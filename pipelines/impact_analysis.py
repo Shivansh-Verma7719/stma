@@ -113,33 +113,8 @@ def analyze_impact_rigorous():
         plt.savefig('visualizations/impact_analysis/impact_correlation_matrix.png', dpi=300)
         print("Saved visualizations/impact_analysis/impact_correlation_matrix.png")
         
-        # --- Study 1: Information Coefficient (IC) Analysis (Signal Quality) ---
-        print("\n--- 1. Information Coefficient (IC) Analysis ---")
-        
-        # Daily IC
-        ic_series = data_filtered.groupby('date').apply(lambda x: x['norm_bias_score'].corr(x['ret_next'], method='spearman'))
-        # 5-Day IC
-        ic_series_5d = data_filtered.groupby('date').apply(lambda x: x['norm_bias_score'].corr(x['ret_5d'], method='spearman'))
-        
-        print(f"1-Day IC: Mean={ic_series.mean():.4f}, IR={ic_series.mean()/ic_series.std():.4f}")
-        print(f"5-Day IC: Mean={ic_series_5d.mean():.4f}, IR={ic_series_5d.mean()/ic_series_5d.std():.4f}")
-        
-        # Plot Cumulative IC
-        plt.figure(figsize=(12, 6))
-        ic_series.cumsum().plot(color='blue', linewidth=2, label='1-Day Forward')
-        ic_series_5d.cumsum().plot(color='orange', linewidth=2, linestyle='--', label='5-Day Forward')
-        plt.title(f"Cumulative Information Coefficient (Signal Quality)", fontsize=14)
-        plt.xlabel("Date")
-        plt.ylabel("Cumulative Rank Correlation")
-        plt.axhline(0, color='black', linestyle='--')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        plt.savefig('visualizations/impact_analysis/impact_cumulative_ic.png', dpi=300)
-        print("Saved visualizations/impact_analysis/impact_cumulative_ic.png")
-        
-        # --- Study 2: Panel Regression Splitted ---
-        print("\n--- 2. Panel Regression (Split Pos/Neg) ---")
+        # --- Study 1: Panel Regression Splitted ---
+        print("\n--- 1. Panel Regression (Split Pos/Neg) ---")
         
         results_txt = "REGRESSION RESULTS\n\n"
         results_txt += "| Regime | Forecast Horizon | Beta | P-Value | Significance |\n"
@@ -206,40 +181,6 @@ def analyze_impact_rigorous():
         plt.tight_layout()
         plt.savefig('visualizations/impact_analysis/impact_beta_plot.png', dpi=300)
         print("Saved visualizations/impact_analysis/impact_beta_plot.png")
-
-        # --- Study 3: Aggregated Granger Causality ---
-        print("\n--- 3. Aggregated Granger Causality ---")
-        top_tickers = data['ticker'].value_counts().head(50).index.tolist()
-        
-        p_values = []
-        significant_count = 0
-        
-        for ticker in top_tickers:
-            sub = data[data['ticker'] == ticker]
-            if len(sub) > 50:
-                try:
-                    # Test: Bias -> Return (Lag 3)
-                    gc_res = grangercausalitytests(sub[['ret_next', 'norm_bias_score']], maxlag=[3], verbose=False)
-                    p_val = gc_res[3][0]['ssr_ftest'][1]
-                    p_values.append(p_val)
-                    if p_val < 0.05:
-                        significant_count += 1
-                except:
-                    pass
-        
-        prevalence = (significant_count / len(p_values)) * 100 if p_values else 0
-        print(f"Prevalence of Causality: {prevalence:.2f}% of top companies show significant relation (p<0.05)")
-        
-        # Plot P-Value Distribution
-        plt.figure(figsize=(8, 5))
-        sns.histplot(p_values, bins=20, kde=True, color='purple')
-        plt.axvline(0.05, color='red', linestyle='--', label='Significance Threshold (0.05)')
-        plt.title(f"Distribution of Granger Causality P-Values\n{prevalence:.1f}% Significant", fontsize=14)
-        plt.xlabel("P-Value")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig('visualizations/impact_analysis/impact_granger_dist.png', dpi=300)
-        print("Saved visualizations/impact_analysis/impact_granger_dist.png")
 
     except Exception as e:
         print(f"Error: {e}")
