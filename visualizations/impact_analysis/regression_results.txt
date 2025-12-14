@@ -1,0 +1,16 @@
+REGRESSION RESULTS
+
+| Regime | Forecast Horizon | Beta | P-Value | Significance |
+| :--- | :--- | :--- | :--- | :--- |
+| OVERALL | 1-Day | -0.0001 | 0.4171 | Insignificant |
+| OVERALL | 5-Day | -0.0005 | 0.2522 | Insignificant |
+| OVERALL | 14-Day | -0.0016 | 0.1893 | Insignificant |
+| OVERALL | 30-Day | -0.0034 | 0.1129 | Insignificant |
+| POSITIVE (>0) | 1-Day | -0.0001 | 0.6653 | Insignificant |
+| POSITIVE (>0) | 5-Day | -0.0007 | 0.5158 | Insignificant |
+| POSITIVE (>0) | 14-Day | 0.0000 | 0.9912 | Insignificant |
+| POSITIVE (>0) | 30-Day | -0.0025 | 0.5973 | Insignificant |
+| NEGATIVE (<0) | 1-Day | -0.0003 | 0.1041 | Insignificant |
+| NEGATIVE (<0) | 5-Day | -0.0028 | 0.0063 | Significant |
+| NEGATIVE (<0) | 14-Day | -0.0053 | 0.0192 | Significant |
+| NEGATIVE (<0) | 30-Day | -0.0093 | 0.0293 | Significant |
