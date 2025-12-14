@@ -59,43 +59,14 @@ stma/
 └── visualizations/      # Generated visualization outputs
 ```
 
-## Infrastructure
-
-The infrastructure is managed using AWS CDK and consists of:
-- **VPC**: One Public VPC (No NAT Gateway)
-- **RDS**: PostgreSQL Database (Max 100GB, PostgreSQL 16)
-- **Deployment**: Automated via GitHub Actions workflow `.github/workflows/deploy.yml` on changes to `infra/cdk/`
-
 ## Getting Started
 
 ### Prerequisites
 
 - Python 3.8+
-- AWS CLI configured
-- CDK CLI installed (`npm install -g aws-cdk`)
 - PostgreSQL client tools
 
-### 1. Infrastructure Setup
-
-1. **Install CDK Dependencies**:
-   ```bash
-   cd infra/cdk
-   pip install -r requirements.txt
-   ```
-
-2. **Deploy Infrastructure**:
-   ```bash
-   cd infra/cdk
-   cdk deploy
-   ```
-
-3. **Database Setup**:
-   Apply the schema in `infra/db/schema.sql` to your RDS instance:
-   ```bash
-   psql -h <DB_HOST> -U <DB_USER> -d projectdb -f infra/db/schema.sql
-   ```
-
-### 2. Environment Configuration
+### Environment Configuration
 
 Create a `.env` file in the `pipelines/` directory with your credentials:
 
@@ -120,7 +91,7 @@ Install project dependencies:
 pip install -r requirements.txt
 ```
 
-### 4. Data Collection Pipelines
+### Data Collection Pipelines
 
 The pipelines are located in `pipelines/` and can be run independently:
 
@@ -155,27 +126,13 @@ cd pipelines
 python BERT.py  # Analyze article sentiment using FinBERT
 ```
 
-### 5. Anomaly Detection Pipeline
-
-The anomaly detection system processes financial data through an integrated pipeline:
-
 #### Running the Complete Pipeline
 
 The main entry point runs all processing steps in order:
 
 ```bash
-cd anomaly_det
 python main.py
 ```
-
-This single command executes the complete pipeline:
-1. **Data Fetching**: Retrieves data from the database
-2. **Market Data Processing**: Processes and normalizes market data (renames `norm_bias_score` to `bias_index`)
-3. **Feature Engineering**: Adds technical indicators (velocity, OBV, MACD, impulse, supertrend, squeeze)
-4. **Statistical Anomaly Detection**: Detects silent shocks and volume anomalies using Z-scores
-5. **Result Aggregation**: Aggregates statistical results and generates reports
-6. **Media Follow Analysis**: Analyzes whether media follows or contradicts price trends
-7. **Event Study**: Studies media reaction to extreme price movements (>2%)
 
 #### Output Directories
 
@@ -183,53 +140,17 @@ The pipeline generates outputs in three directories:
 - `final_study_output/`: Silent shock reports and time series plots
 - `narrative_test/`: Media behavior classification (trend follower vs contrarian)
 - `event_study/`: Event study statistics and trajectory plots
+- `visualizations/`: Visualizations of market data and technical indicators along with bias index
 
-## Anomaly Detection Methods
-
-The system uses multiple complementary analysis methods:
-
-1. **Statistical Anomaly Detection** (`statistical.py`)
-   - Z-score analysis for price movements
-   - Volume shock detection (relative volume > 3x)
-   - "Silent anomaly" detection (price/volume shocks without corresponding sentiment)
-   - Identifies days where market moves occur without matching media sentiment
-
-2. **Media Follow Analysis** (`media_follow.py`)
-   - Tests whether media sentiment follows or contradicts price movements
-   - Classifies stocks as "Trend Follower" or "Contrarian" based on regression analysis
-   - Uses 14-day lag to test if price returns today affect future media bias
-
-3. **Event Study** (`study.py`)
-   - Analyzes media reaction to extreme price movements (>2% moves)
-   - Tracks bias trajectory 5 days before and 10 days after price shocks
-   - Statistical significance testing for media response patterns
-   - Generates trajectory plots and statistical tables
-
-## Technical Indicators
-
-The system calculates various technical indicators:
-- **Velocity Indicator**: Price momentum measure
-- **OBV (On-Balance Volume)**: Volume-weighted price indicator
-- **MACD**: Moving Average Convergence Divergence
-- **Impulse Histogram**: Momentum indicator
-- **SuperTrend**: Trend-following indicator
-- **Squeeze Indicator**: Volatility compression indicator
-
-## Scripts
-
-Utility scripts in `scripts/`:
-- `seed_sp500.py`: Seed database with S&P 500 company data
-- `check_duplicates.py`: Check for duplicate entries
-- `delete_non_top250.py`: Clean up non-top 250 companies
-- `generate_visualizations.py`: Generate data visualizations
-- `run_pipeline.sh`: Run pipelines in tmux session
-- `init_db.sh`: Initialize database schema
 
 ## Output
 
-The anomaly detection pipeline generates:
+The main pipeline (`main.py`) generates:
+### Impact Analysis
+- CSV and PNG tables with impact analysis results
+Output of `main.py` is stored in `visualizations/` and `final_study_output/`
 
-### Final Study Output (`final_study_output/`)
+### Final Study Output (`final_study_output/`) only anomaly detection
 - **Silent Shocks Report**: Text report analyzing silent anomalies
 - **Time Series Plot**: Visualization of silent shock patterns over time
 
@@ -240,31 +161,3 @@ The anomaly detection pipeline generates:
 ### Event Study (`event_study/`)
 - **Event Study Statistics**: CSV and PNG table with statistical significance results
 - **Trajectory Plot**: Visualization of media bias path before and after price shocks
-
-## Development
-
-### Running Pipelines in Background
-
-Use the provided shell scripts to run pipelines in tmux sessions:
-```bash
-./scripts/run_pipeline.sh
-./scripts/run_bert_nohup.sh
-./scripts/run_content_scraper_nohup.sh
-```
-
-### Monitoring
-
-- Pipeline logs are saved to `pipelines/logs/`
-- Use `tmux attach -t <session_name>` to monitor running pipelines
-
-## Dependencies
-
-Key dependencies (see `requirements.txt` for full list):
-- `pandas`, `numpy`: Data processing
-- `scikit-learn`: Machine learning models
-- `yfinance`: Financial data fetching
-- `mediacloud`: Media Cloud API client
-- `transformers`, `torch`: BERT sentiment analysis
-- `psycopg2`: PostgreSQL database connection
-- `beautifulsoup4`, `newspaper3k`: Web scraping
-- `matplotlib`, `seaborn`: Visualization
