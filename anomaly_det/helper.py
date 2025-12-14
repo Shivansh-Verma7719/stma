@@ -7,8 +7,58 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Configuration
-OUTPUT_DIRECTORY = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/fetch"  # The directory where you want the files
-TABLE_NAME = "final"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_DIRECTORY = os.path.join(
+    BASE_DIR, "fetch"
+)  # The directory where you want the files
+TABLE_NAME = "bias_index"
+
+
+def fetch_data_from_db():
+    """
+    Fetches data from database and returns a dictionary of DataFrames keyed by ticker.
+    Returns: dict[str, pd.DataFrame] - Dictionary mapping ticker to DataFrame
+    """
+    # Connect to DB
+    print("Connecting to database...")
+    conn = psycopg2.connect(
+        host=os.getenv("DB_HOST", "localhost"),
+        database=os.getenv("DB_NAME"),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD"),
+        port=os.getenv("DB_PORT", "5432"),
+    )
+
+    try:
+        # Fetch the data
+        print(f"Fetching data from table '{TABLE_NAME}'...")
+        query = f'SELECT * FROM "{TABLE_NAME}"'
+        df = pd.read_sql(query, conn)
+
+        if df.empty:
+            print("Table is empty.")
+            return {}
+
+        print(f"Fetched {len(df)} rows. Splitting by ticker...")
+
+        # Group by Ticker
+        unique_tickers = df["ticker"].unique()
+        print(f"Found {len(unique_tickers)} unique tickers.")
+
+        result = {}
+        for ticker in unique_tickers:
+            # Filter data for this specific ticker
+            ticker_df = df[df["ticker"] == ticker].copy()
+            result[ticker] = ticker_df
+
+        return result
+
+    except Exception as e:
+        print(f"Error: {e}")
+        return {}
+
+    finally:
+        conn.close()
 
 
 def export_tickers_to_csv():

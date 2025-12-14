@@ -13,8 +13,11 @@ import indicators.velocity_indicator as velocity_indicator
 import indicators.supertrend as supertrend
 
 # --- CONFIGURATION ---
-INPUT_DIR = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/fin_data/"
-OUTPUT_DIR = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/fin_process/"
+import os
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+INPUT_DIR = os.path.join(BASE_DIR, "fin_data")
+OUTPUT_DIR = os.path.join(BASE_DIR, "fin_process")
 MAX_WORKERS = 12  # Number of threads
 
 
@@ -99,12 +102,12 @@ def add_indicators(df):
     return df
 
 
-def clean_and_save(df, output_path):
+def clean_data(df):
     """
-    Cleans up intermediate calculation columns and saves the final dataset.
+    Cleans up intermediate calculation columns and returns the final dataset.
     """
     # Drop NaN values created by lookbacks (e.g. the first 50 days for vol_ma)
-    df.dropna(inplace=True)
+    df = df.dropna().copy()
 
     cols_to_keep = [
         # Original Data
@@ -128,10 +131,109 @@ def clean_and_save(df, output_path):
 
     # Filter columns if they exist
     final_cols = [c for c in cols_to_keep if c in df.columns]
-    final_df = df[final_cols]
+    final_df = df[final_cols].copy()
 
-    # Save
+    return final_df
+
+
+def clean_and_save(df, output_path):
+    """
+    Cleans up intermediate calculation columns and saves the final dataset.
+    """
+    final_df = clean_data(df)
     final_df.to_csv(output_path, index=False)
+
+
+def process_dataframe_in_memory(df, ticker=None):
+    """
+    Processes a single DataFrame in-memory.
+    Returns: pd.DataFrame or None if failed
+    """
+    try:
+        df = df.copy()
+
+        # Add stock_name if missing
+        if "stock_name" not in df.columns:
+            if ticker:
+                df["stock_name"] = ticker
+            else:
+                df["stock_name"] = "UNKNOWN"
+
+        # RUN PIPELINE
+        raw_df = load_and_prep_data_in_memory(df)
+        enriched_df = add_indicators(raw_df)
+        cleaned_df = clean_data(enriched_df)
+
+        return cleaned_df
+
+    except Exception as e:
+        print(f"Error processing {ticker}: {str(e)}")
+        return None
+
+
+def load_and_prep_data_in_memory(df):
+    """
+    Prepares data from a DataFrame (in-memory version).
+    """
+    df = df.copy()
+
+    # Store stock_name and ticker if they exist before renaming
+    stock_name_col = None
+    ticker_col = None
+    if "stock_name" in df.columns:
+        stock_name_col = df["stock_name"].copy()
+    if "ticker" in df.columns:
+        ticker_col = df["ticker"].copy()
+
+    # Standardize column names to lowercase
+    df.columns = df.columns.str.lower().str.strip()
+
+    # MAPPING: User Data -> Indicator Requirements
+    rename_map = {
+        "o": "into",
+        "open": "into",
+        "h": "inth",
+        "high": "inth",
+        "l": "intl",
+        "low": "intl",
+        "c": "intc",
+        "close": "intc",
+        "v": "v",
+        "volume": "v",
+        "vol": "v",
+    }
+    df.rename(columns=rename_map, inplace=True)
+
+    # Ensure 'time' column exists
+    if "time" not in df.columns:
+        if "date" in df.columns:
+            df.rename(columns={"date": "time"}, inplace=True)
+        else:
+            df["time"] = df.index
+
+    # Restore stock_name if it existed
+    if stock_name_col is not None:
+        df["stock_name"] = stock_name_col
+    elif ticker_col is not None:
+        df["stock_name"] = ticker_col
+
+    return df
+
+
+def process_dataframes_in_memory(data_dict):
+    """
+    Processes multiple DataFrames in-memory.
+    Takes a dict of DataFrames keyed by ticker.
+    Returns: dict[str, pd.DataFrame] - Dictionary mapping ticker to processed DataFrame
+    """
+    result = {}
+
+    for ticker, df in data_dict.items():
+        processed = process_dataframe_in_memory(df, ticker)
+        if processed is not None:
+            result[ticker] = processed
+
+    return result
 
 
 def process_single_file(file_path):

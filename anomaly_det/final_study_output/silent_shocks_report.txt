@@ -1,0 +1,6 @@
+=== SILENT SHOCK ANALYSIS ===
+Total Data Points Analyzed: 601310
+Total Silent Shocks Detected: 4911
+Global Rate: 0.82%
+-----------------------------
+Definition: Days where Price moved > 2 Sigma but Media Sentiment remained Neutral (< 0.5 Sigma).

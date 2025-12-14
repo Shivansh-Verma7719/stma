@@ -3,7 +3,7 @@ import numpy as np
 import os
 import glob
 import concurrent.futures
-from sklearn.linear_model import LinearRegression
+from scipy import stats
 import matplotlib.pyplot as plt
 import seaborn as sns
 import time
@@ -12,190 +12,242 @@ import time
 sns.set_theme(style="whitegrid")
 
 # --- CONFIGURATION ---
-INPUT_DIR = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/fin_process/"
-OUTPUT_DIR = "/Users/arnav/Desktop/workspaces/stma/stma/anomaly_det/narrative_test/"
-MAX_WORKERS = 12  # CPU optimized
+import os
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+INPUT_DIR = os.path.join(BASE_DIR, "fin_process")
+OUTPUT_DIR = os.path.join(BASE_DIR, "narrative_test")
+MAX_WORKERS = 12
+LAG_DAYS = 14  # Skip the first 14 days to let the Moving Average wash out
 
 
-def run_momentum_test(input_file, output_file):
+def run_momentum_test_in_memory(df, ticker=None):
     """
-    Tests if Price Returns today affect Media Bias for the next 28 days.
+    Tests if Price Returns today affect Media Bias (after a 14-day lag) - in-memory version.
+    Returns dict with stock_name and behavior, or None if failed.
     """
-    df = pd.read_csv(input_file)
-    required_cols = ["bias_index", "intc", "time", "stock_name"]
-    if not all(col in df.columns for col in required_cols):
-        return "Skipped: Missing columns"
+    try:
+        df = df.copy()
 
-    # 1. Calculate Today's Price Return
-    df["log_returns"] = np.log(df["intc"] / df["intc"].shift(1))
+        # Handle missing stock_name automatically
+        if "stock_name" not in df.columns:
+            if ticker:
+                df["stock_name"] = ticker
+            else:
+                df["stock_name"] = "UNKNOWN"
 
-    # 2. Prepare Future Media Bias Windows
-    # We check if Price(t) predicts Bias(t+1 ... t+N)
-    indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=7)
-    df["future_bias_7d"] = df["bias_index"].rolling(window=indexer).mean()
+        # Ensure norm_bias_score is renamed to bias_index
+        if "norm_bias_score" in df.columns:
+            df["bias_index"] = df["norm_bias_score"]
+        elif "bias_index" not in df.columns:
+            return None
 
-    indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=14)
-    df["future_bias_14d"] = df["bias_index"].rolling(window=indexer).mean()
+        # Check columns
+        required_cols = ["bias_index", "intc", "time", "stock_name"]
+        missing_cols = [col for col in required_cols if col not in df.columns]
 
-    indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=28)
-    df["future_bias_28d"] = df["bias_index"].rolling(window=indexer).mean()
+        if missing_cols:
+            return None
 
-    # Drop NaNs
-    data = df.dropna(subset=["log_returns", "future_bias_28d"]).copy()
+        # Calculate Today's Price Return
+        df["log_returns"] = np.log(df["intc"] / df["intc"].shift(1))
 
-    if len(data) < 50:
-        return "Skipped: Not enough data"
+        # Prepare Future Media Bias Windows (WITH LAG)
+        lagged_bias = df["bias_index"].shift(-LAG_DAYS)
 
-    # 3. Run Regressions
-    X = data[["log_returns"]]
+        # We only need the 28-day window for the general classification
+        indexer_28 = pd.api.indexers.FixedForwardWindowIndexer(window_size=28)
+        df["future_bias_28d"] = lagged_bias.rolling(window=indexer_28).mean()
 
-    # Model 7 Days
-    model_7 = LinearRegression().fit(X, data["future_bias_7d"])
-    r2_7 = model_7.score(X, data["future_bias_7d"])
-    slope_7 = model_7.coef_[0]
+        # Drop NaNs
+        data = df.dropna(subset=["log_returns", "future_bias_28d"]).copy()
 
-    # Model 14 Days
-    model_14 = LinearRegression().fit(X, data["future_bias_14d"])
-    r2_14 = model_14.score(X, data["future_bias_14d"])
-    slope_14 = model_14.coef_[0]
+        if len(data) < 50:
+            return None
 
-    # Model 28 Days
-    model_28 = LinearRegression().fit(X, data["future_bias_28d"])
-    r2_28 = model_28.score(X, data["future_bias_28d"])
-    slope_28 = model_28.coef_[0]
+        # Run Regression
+        X = data["log_returns"]
+        slope_28, _, _, _, _ = stats.linregress(X, data["future_bias_28d"])
 
-    # 4. Save Summary
-    summary_df = pd.DataFrame(
-        [
-            {
-                "stock_name": data["stock_name"].iloc[0],
-                # Strength (Does it stick?)
-                "strength_7d": r2_7,
-                "strength_14d": r2_14,
-                "strength_28d": r2_28,
-                # Direction (Do they follow?)
-                "slope_7d": slope_7,
-                "slope_28d": slope_28,
-                # Classification (Based on 28-day lingering effect)
-                # Slope > 0: Price Up -> Bias Positive (Follower)
-                # Slope < 0: Price Up -> Bias Negative (Contrarian)
-                "behavior": "Trend Follower" if slope_28 > 0 else "Contrarian",
-            }
-        ]
-    )
+        # Determine Behavior
+        behavior = "Trend Follower" if slope_28 > 0 else "Contrarian"
 
-    summary_df.to_csv(output_file, index=False)
-    return "Success"
+        # Return Summary
+        return {"stock_name": data["stock_name"].iloc[0], "behavior": behavior}
+
+    except Exception as e:
+        return None
+
+
+def process_dataframes_in_memory(data_dict):
+    """
+    Processes multiple DataFrames in-memory.
+    Takes a dict of DataFrames keyed by ticker.
+    Returns: list of dicts with stock_name and behavior
+    """
+    results = []
+
+    for ticker, df in data_dict.items():
+        result = run_momentum_test_in_memory(df, ticker)
+        if result is not None:
+            results.append(result)
+
+    return results
+
+
+def run_momentum_test(input_file):
+    """
+    Tests if Price Returns today affect Media Bias (after a 14-day lag).
+    Returns only what is needed for the classification pie chart.
+    """
+    try:
+        df = pd.read_csv(input_file)
+
+        # 1. FIX: Handle missing stock_name automatically
+        if "stock_name" not in df.columns:
+            filename = os.path.basename(input_file)
+            ticker = os.path.splitext(filename)[0]
+            df["stock_name"] = ticker
+
+        # Ensure norm_bias_score is renamed to bias_index
+        if "norm_bias_score" in df.columns:
+            df["bias_index"] = df["norm_bias_score"]
+        elif "bias_index" not in df.columns:
+            return None
+
+        # 2. Check columns
+        required_cols = ["bias_index", "intc", "time", "stock_name"]
+        missing_cols = [col for col in required_cols if col not in df.columns]
+
+        if missing_cols:
+            return None
+
+        # 3. Calculate Today's Price Return
+        df["log_returns"] = np.log(df["intc"] / df["intc"].shift(1))
+
+        # 4. Prepare Future Media Bias Windows (WITH LAG)
+        # We shift the bias column backwards by LAG_DAYS (14).
+        # So at row 't', we are seeing the bias starting at 't+14'.
+        lagged_bias = df["bias_index"].shift(-LAG_DAYS)
+
+        # We only need the 28-day window for the general classification
+        indexer_28 = pd.api.indexers.FixedForwardWindowIndexer(window_size=28)
+        df["future_bias_28d"] = lagged_bias.rolling(window=indexer_28).mean()
+
+        # Drop NaNs
+        data = df.dropna(subset=["log_returns", "future_bias_28d"]).copy()
+
+        if len(data) < 50:
+            return None
+
+        # 5. Run Regression (Effectively t+14 to t+42)
+        X = data["log_returns"]
+        slope_28, _, _, _, _ = stats.linregress(X, data["future_bias_28d"])
+
+        # 6. Determine Behavior (NO FILTER - Raw Direction)
+        behavior = "Trend Follower" if slope_28 > 0 else "Contrarian"
+
+        # 7. Return Summary
+        return {"stock_name": data["stock_name"].iloc[0], "behavior": behavior}
+
+    except Exception as e:
+        print(f"Error processing {os.path.basename(input_file)}: {str(e)}")
+        return None
 
 
 def process_single_file(file_path):
+    return run_momentum_test(file_path)
+
+
+def generate_pie_chart(master_df, output_dir):
+    print("Generating Classification Pie Chart...")
+
+    if master_df.empty:
+        return
+
     try:
-        filename = os.path.basename(file_path)
-        output_path = os.path.join(OUTPUT_DIR, f"MOMENTUM_{filename}")
-        status = run_momentum_test(file_path, output_path)
-        return f"{status}: {filename}"
-    except Exception as e:
-        return f"Error: {e}"
+        # --- PLOT: The Follower Ratio (ALL STOCKS) ---
+        counts = master_df["behavior"].value_counts()
 
+        plt.figure(figsize=(8, 8))
 
-def generate_momentum_plots(master_df, output_dir):
-    """
-    Generates visualizations for Media Hangover and Direction.
-    """
-    print("Generating Narrative Momentum Plots...")
+        # Determine colors based on labels to ensure consistency
+        colors = []
+        for label in counts.index:
+            if label == "Trend Follower":
+                colors.append("#99ff99")  # Green
+            else:
+                colors.append("#ffcc99")  # Orange
 
-    # --- PLOT 1: The Hangover Curve (Strength) ---
-    means = {
-        "7 Days": master_df["strength_7d"].mean(),
-        "14 Days": master_df["strength_14d"].mean(),
-        "28 Days": master_df["strength_28d"].mean(),
-    }
-
-    plt.figure(figsize=(10, 6))
-    bars = plt.bar(
-        means.keys(), means.values(), color=["#ff9999", "#66b3ff", "#99ff99"]
-    )
-    plt.title(
-        "The 'Media Hangover': How Long Does Price Impact Sentiment?", fontsize=14
-    )
-    plt.ylabel("Predictive Strength (R-Squared)", fontsize=12)
-    plt.xlabel("Time after Price Move", fontsize=12)
-
-    for bar in bars:
-        yval = bar.get_height()
-        plt.text(
-            bar.get_x() + bar.get_width() / 2,
-            yval,
-            f"{yval:.5f}",
-            va="bottom",
-            ha="center",
+        plt.pie(
+            counts,
+            labels=counts.index,
+            autopct="%1.1f%%",
+            colors=colors,
+            startangle=140,
         )
 
-    plt.savefig(os.path.join(output_dir, "plot_1_hangover_strength.png"))
-    plt.close()
+        plt.title("Is the Media a 'Trend Follower'? (All Stocks)", fontsize=14)
 
-    # --- PLOT 2: The Follower Ratio (Direction) ---
-    # We count how many stocks are "Trend Followers" vs "Contrarians"
-    counts = master_df["behavior"].value_counts()
+        output_path = os.path.join(output_dir, "plot_2_media_behavior_all.png")
+        plt.savefig(output_path)
+        plt.close()
+        print(f"Pie chart saved to: {output_path}")
 
-    plt.figure(figsize=(8, 8))
-    plt.pie(
-        counts,
-        labels=counts.index,
-        autopct="%1.1f%%",
-        colors=["#ffcc99", "#99ff99"],
-        startangle=140,
-    )
-    plt.title("Is the Media a 'Trend Follower'?", fontsize=14)
-
-    plt.savefig(os.path.join(output_dir, "plot_2_media_behavior.png"))
-    plt.close()
-
-    print("Plots saved.")
+    except Exception as e:
+        print(f"Error generating plot: {e}")
 
 
 if __name__ == "__main__":
     start_time = time.time()
 
-    if not os.path.exists(OUTPUT_DIR):
-        os.makedirs(OUTPUT_DIR)
+    if not os.path.exists(INPUT_DIR):
+        print(f"Error: Input directory {INPUT_DIR} not found.")
+    else:
+        if not os.path.exists(OUTPUT_DIR):
+            os.makedirs(OUTPUT_DIR)
 
-    csv_files = glob.glob(os.path.join(INPUT_DIR, "*.csv"))
-    print(f"Testing Narrative Momentum on {len(csv_files)} stocks...")
+        csv_files = glob.glob(os.path.join(INPUT_DIR, "*.csv"))
+        total_files = len(csv_files)
 
-    # 1. Parallel Execution
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        results = list(executor.map(process_single_file, csv_files))
+        print(f"Testing Narrative Momentum on {total_files} stocks...")
 
-    # 2. Aggregation
-    print("Aggregating results...")
-    all_summaries = []
-    result_files = glob.glob(os.path.join(OUTPUT_DIR, "MOMENTUM_*.csv"))
+        if total_files > 0:
+            all_results = []
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=MAX_WORKERS
+            ) as executor:
+                futures = {
+                    executor.submit(process_single_file, f): f for f in csv_files
+                }
+                for i, future in enumerate(concurrent.futures.as_completed(futures)):
+                    result = future.result()
+                    if result is not None:
+                        all_results.append(result)
 
-    for f in result_files:
-        all_summaries.append(pd.read_csv(f))
+                    # Simple progress update
+                    if (i + 1) % max(1, total_files // 10) == 0:
+                        print(f"Progress: {i + 1}/{total_files}...")
 
-    if all_summaries:
-        master_df = pd.concat(all_summaries)
-        master_path = os.path.join(OUTPUT_DIR, "_MASTER_MOMENTUM_REPORT.csv")
-        master_df.to_csv(master_path, index=False)
+            if all_results:
+                master_df = pd.DataFrame(all_results)
 
-        # 3. Generate Visuals
-        generate_momentum_plots(master_df, OUTPUT_DIR)
+                # Save data for reference
+                master_df.to_csv(
+                    os.path.join(OUTPUT_DIR, "_MASTER_MOMENTUM_REPORT.csv"), index=False
+                )
 
-        # Console Report
-        avg_7 = master_df["strength_7d"].mean()
-        avg_28 = master_df["strength_28d"].mean()
-        follower_pct = (master_df["behavior"] == "Trend Follower").mean() * 100
+                generate_pie_chart(master_df, OUTPUT_DIR)
 
-        print("\n=== NARRATIVE MOMENTUM RESULTS ===")
-        print(f"Momentum Strength (7 Days):  {avg_7:.5f}")
-        print(f"Momentum Strength (28 Days): {avg_28:.5f}")
-        print(f"Media Behavior: {follower_pct:.1f}% Trend Followers")
+                # Console Summary
+                follower_pct = (master_df["behavior"] == "Trend Follower").mean() * 100
+                print("\n=== FINAL VERDICT ===")
+                print(f"Stocks Analyzed: {len(master_df)}")
+                print(f"Trend Followers: {follower_pct:.1f}%")
 
-        if follower_pct > 50:
-            print("VERDICT: The Media generally FOLLOWS the Price Trend.")
+            else:
+                print("No results.")
         else:
-            print("VERDICT: The Media generally FIGHTS the Price Trend.")
+            print("No CSV files found.")
 
     print(f"Done in {time.time() - start_time:.2f}s")
